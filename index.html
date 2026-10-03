@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BioTeva Monitor</title>
+<meta name="description" content="Monitoreo de temperatura y humedad de las cajas de grillos leyendo termohigrómetros HTC-2 con la cámara del computador." />
+<meta name="theme-color" content="#1b4d2e" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="monitor.css" />
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap topbar">
+    <div class="brand"><b>BioTeva</b><span>Monitoreo ambiental</span></div>
+    <div class="status-strip" aria-live="polite">
+      <span class="pill" id="camPill">CAMERA OFF</span>
+      <span class="pill" id="runPill">DETENIDO</span>
+      <span class="pill mono" id="lastPill">LAST READING: —</span>
+      <span class="pill mono" id="nextPill">NEXT READING: —</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="top-actions">
+      <button class="btn primary" id="runBtn" type="button">▶ Iniciar monitoreo</button>
+      <button class="btn" id="nowBtn" type="button">Leer ahora</button>
+      <button class="btn" id="xlsxBtn" type="button" title="Exporta los últimos 30 días">⤓ Exportar Excel</button>
+      <button class="btn" id="installBtn" type="button" hidden>⊕ Instalar app</button>
+      <button class="icon-btn" id="themeBtn" type="button" title="Cambiar tema" aria-label="Cambiar tema">◐</button>
+    </div>
+  </div>
+  <div class="wrap">
+    <nav class="tabs" role="tablist" aria-label="Secciones del monitoreo" id="tabs">
+      <button class="tab" role="tab" data-view="dashboard" aria-selected="true">Dashboard</button>
+      <button class="tab" role="tab" data-view="camara" aria-selected="false">Cámara</button>
+      <button class="tab" role="tab" data-view="calibracion" aria-selected="false">Calibración</button>
+      <button class="tab" role="tab" data-view="termico" aria-selected="false">Control térmico</button>
+      <button class="tab" role="tab" data-view="sensores" aria-selected="false">Sensores</button>
+      <button class="tab" role="tab" data-view="historico" aria-selected="false">Histórico</button>
+      <button class="tab" role="tab" data-view="graficas" aria-selected="false">Gráficas</button>
+      <button class="tab" role="tab" data-view="alertas" aria-selected="false">Alertas <span class="count" id="alertCount">0</span></button>
+      <button class="tab" role="tab" data-view="reportes" aria-selected="false">Reportes</button>
+      <button class="tab" role="tab" data-view="configuracion" aria-selected="false">Configuración</button>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap" id="banners"></div>
+<div class="wrap"><div id="bootMsg" class="boot" role="status">Cargando BioTeva Monitor…</div></div>
+
+<main class="wrap">
+  <!-- ───────────── DASHBOARD ───────────── -->
+  <section data-view="dashboard" class="col"></section>
+
+  <!-- ───────────── CÁMARA ───────────── -->
+  <section data-view="camara" class="col" hidden>
+    <div class="panel">
+      <header><h2>Fuente de imagen</h2></header>
+      <div class="panel-body col">
+        <div class="seg" role="radiogroup" aria-label="Fuente de imagen" id="srcGroup">
+          <label><input type="radio" name="frameSource" value="camera" /> <span>Cámara</span></label>
+          <label><input type="radio" name="frameSource" value="image" /> <span>Imagen estática (prueba)</span></label>
+          <label><input type="radio" name="frameSource" value="simulation" /> <span>Simulación</span></label>
+        </div>
+
+        <div id="srcCamera" class="col">
+          <p class="hint" id="secureHint"></p>
+          <div class="grid-form">
+            <label class="f"><span>Modo</span>
+              <select id="camMode">
+                <option value="single">Una cámara → Sensor A + Sensor B</option>
+                <option value="dual">Dos cámaras → Cámara 1: Sensor A · Cámara 2: Sensor B</option>
+              </select></label>
+            <label class="f single-only"><span>Cámara</span><select id="camSelect"></select></label>
+            <label class="f dual-only"><span>Cámara del Sensor A</span><select id="camSelA"></select></label>
+            <label class="f dual-only"><span>Cámara del Sensor B</span><select id="camSelB"></select></label>
+            <label class="f"><span>Resolución</span>
+              <select id="camRes"><option value="640x480">640 × 480</option><option value="1280x720">1280 × 720 (HD)</option><option value="1920x1080">1920 × 1080 (Full HD)</option></select></label>
+            <label class="f"><span>FPS de la vista previa</span><input id="camFps" type="number" min="1" max="30" step="1" /></label>
+          </div>
+          <div class="row-actions">
+            <button class="btn primary" id="camStart" type="button">Activar cámara</button>
+            <button class="btn" id="camStop" type="button">Desactivar</button>
+            <button class="btn ghost" id="camRefresh" type="button">Buscar cámaras</button>
+          </div>
+          <p class="msg" id="camMsg" role="status"></p>
+          <p class="hint">La cámara solo se enciende cuando pulsas <b>Activar cámara</b>; Chrome pedirá permiso la primera vez. El video nunca sale de este equipo: cada ciclo toma un fotograma, lo analiza aquí y guarda solo los números.</p>
+        </div>
+
+        <div id="srcImage" class="col" hidden>
+          <label class="f file"><span>Fotografía de un HTC-2</span><input type="file" id="imgFile" accept="image/*" /></label>
+          <p class="hint">Sirve para comprobar el OCR sin cámara: carga una foto, calibra las regiones en <b>Calibración</b> y pulsa <b>Captura de prueba</b>. <a href="samples/htc2-demo.png" download>Descargar imagen de ejemplo (sintética)</a>.</p>
+        </div>
+
+        <div id="srcSim" class="col" hidden>
+          <p class="hint"><b>Modo simulación:</b> genera en pantalla dos displays tipo HTC-2 con valores ficticios y los procesa con el mismo OCR, validación y alertas que la cámara real. Todo lo generado queda marcado como <b>simulación</b>. Anomalías a inyectar:</p>
+          <div class="checks" id="simAnoms">
+            <label><input type="checkbox" data-anom="drop" /> Caída brusca de temperatura (Sensor A)</label>
+            <label><input type="checkbox" data-anom="rise" /> Subida de temperatura (Sensor B)</label>
+            <label><input type="checkbox" data-anom="humidityJump" /> Salto de humedad (+15 %, ambos)</label>
+            <label><input type="checkbox" data-anom="freeze" /> Valores congelados (Sensor B)</label>
+            <label><input type="checkbox" data-anom="hideB" /> Sensor B fuera del encuadre</label>
+            <label><input type="checkbox" data-anom="blankA" /> Pantalla apagada (Sensor A)</label>
+            <label><input type="checkbox" data-anom="noise" /> Imagen con mucho ruido (errores OCR)</label>
+            <label><input type="checkbox" data-anom="cameraFail" /> Cámara sin señal</label>
+            <label><input type="checkbox" data-anom="move" /> Mover los sensores (prueba de seguimiento)</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <header><h2>Vista previa</h2><div class="spacer"></div><button class="btn" id="testCapture" type="button">Captura de prueba</button></header>
+      <div class="panel-body col">
+        <div class="canvas-box"><canvas id="previewCanvas" width="1280" height="720" aria-label="Vista previa de la cámara con las regiones de los sensores"></canvas></div>
+        <div id="testResult"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── CALIBRACIÓN ───────────── -->
+  <section data-view="calibracion" class="col" hidden>
+    <div class="panel">
+      <header>
+        <h2>Calibrar sensor</h2><div class="spacer"></div>
+        <div class="seg small" role="radiogroup" aria-label="Sensor a calibrar" id="calSensorGroup">
+          <label><input type="radio" name="calSensor" value="A" checked /> <span>Sensor A</span></label>
+          <label><input type="radio" name="calSensor" value="B" /> <span>Sensor B</span></label>
+        </div>
+        <button class="btn" id="calFreeze" type="button" aria-pressed="false">Congelar imagen</button>
+      </header>
+      <div class="panel-body col">
+        <div class="auto-box">
+          <div class="row-actions">
+            <button class="btn primary" id="calDetect" type="button">🔍 Detectar pantallas automáticamente</button>
+            <button class="btn" id="calSwap" type="button">Intercambiar A ↔ B</button>
+            <button class="btn" id="calCopy" type="button">Copiar regiones de valores al otro sensor</button>
+          </div>
+          <label class="f inline"><input type="checkbox" id="calTrack" /> <span><b>Seguir esta pantalla si se mueve</b> (se reubica sola en cada lectura)</span></label>
+          <p class="hint">¿No la detecta? Haz <b>clic sobre la pantalla</b> del sensor seleccionado y se ajusta sola alrededor del clic. Si aun así no, arrastra un rectángulo a mano.</p>
+        </div>
+        <ol class="steps">
+          <li>Activa la cámara (o elige imagen / simulación en <b>Cámara</b>).</li>
+          <li>Pulsa <b>Detectar pantallas</b> o haz <b>clic</b> sobre la pantalla del sensor (también puedes arrastrar un rectángulo).</li>
+          <li>Si hace falta, ajusta las 4 esquinas, la rotación y la escala.</li>
+          <li>En la vista rectificada, elige un valor y dibuja su región.</li>
+          <li>Revisa la lectura de prueba y pulsa <b>Guardar calibración</b>.</li>
+        </ol>
+        <div class="cal-grid">
+          <div class="col">
+            <div class="canvas-box"><canvas id="calCanvas" width="1280" height="720" tabindex="0" aria-label="Imagen de la cámara: arrastra para marcar el sensor"></canvas></div>
+            <div class="row-actions">
+              <button class="btn" type="button" data-cal="rot-">↺ Rotar −1°</button>
+              <button class="btn" type="button" data-cal="rot+">↻ Rotar +1°</button>
+              <button class="btn" type="button" data-cal="scale-">− Escala 3 %</button>
+              <button class="btn" type="button" data-cal="scale+">+ Escala 3 %</button>
+              <button class="btn ghost" type="button" data-cal="reset">Restablecer</button>
+            </div>
+          </div>
+          <div class="col">
+            <h3 class="sub-h">Vista rectificada (perspectiva corregida)</h3>
+            <div class="canvas-box rect"><canvas id="rectCanvas" width="480" height="386" aria-label="Pantalla rectificada: arrastra para marcar la región del valor seleccionado"></canvas></div>
+            <div class="seg small" role="radiogroup" aria-label="Región a dibujar" id="calFieldGroup">
+              <label><input type="radio" name="calField" value="tempIn" checked /> <span>Temp. IN</span></label>
+              <label><input type="radio" name="calField" value="tempOut" /> <span>Temp. OUT</span></label>
+              <label><input type="radio" name="calField" value="humidity" /> <span>Humedad</span></label>
+              <label><input type="radio" name="calField" value="time" /> <span>Hora</span></label>
+            </div>
+            <label class="f inline"><span>Inclinación de los dígitos</span><input type="range" id="calSlant" min="-20" max="20" step="1" /><output id="calSlantOut">0°</output></label>
+            <label class="f inline"><input type="checkbox" id="calLight" /> <span>Segmentos claros sobre fondo oscuro (display retroiluminado)</span></label>
+            <div class="table-scroll"><table class="compact" id="calFields"></table></div>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button class="btn primary" id="calSave" type="button">Guardar calibración</button>
+          <span class="msg" id="calMsg" role="status"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section data-view="termico" class="col" hidden></section>
+  <section data-view="sensores" class="col" hidden></section>
+  <section data-view="historico" class="col" hidden></section>
+  <section data-view="graficas" class="col" hidden></section>
+  <section data-view="alertas" class="col" hidden></section>
+  <section data-view="reportes" class="col" hidden></section>
+  <section data-view="configuracion" class="col" hidden></section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    BioTeva Monitor · Procesamiento 100 % local (cámara → OCR → base en este navegador). No se envían imágenes ni datos a internet.
+    <span id="footMode"></span>
+  </div>
+</footer>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<dialog id="snapDialog">
+  <form method="dialog" class="dlg-head"><b id="snapTitle">Evidencia</b><button class="btn ghost" value="close" aria-label="Cerrar">✕</button></form>
+  <img id="snapImg" alt="Fotograma guardado como evidencia de la lectura" />
+</dialog>
+
+<!-- Un solo archivo (generado desde js/*.js con npm run build:monitor) -->
+<script src="js/monitor.bundle.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "BioTeva Monitor ambiental",
+  "short_name": "BioTeva Monitor",
+  "description": "Lee con la cámara los termohigrómetros HTC-2 de las cajas de grillos: histórico, alertas, gráficas y Excel. Funciona sin internet.",
+  "lang": "es-CO",
+  "start_url": "./#dashboard",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f3ee",
+  "theme_color": "#1b4d2e",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
