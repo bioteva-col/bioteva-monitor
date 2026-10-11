@@ -144,14 +144,24 @@
     if (!window.isSecureContext) return setCamStatus("error", "La cámara solo funciona en un origen seguro: ábrela como extensión, en http://localhost o por https.");
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return setCamStatus("error", "Este navegador no permite usar la cámara (getUserMedia no disponible).");
     stopCameras();
+    App.cam.lastTry = Date.now();
     setCamStatus("starting");
     const [w, h] = App.settings.resolution.split("x").map(Number);
     try {
       for (const id of wantedDeviceIds()) {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const constraints = (dev) => ({
           audio: false,
-          video: { deviceId: id ? { exact: id } : undefined, width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: App.settings.fps } },
+          video: { deviceId: dev ? { exact: dev } : undefined, width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: App.settings.fps } },
         });
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints(id));
+        } catch (e) {
+          if (!id || (e.name !== "OverconstrainedError" && e.name !== "NotFoundError")) throw e;
+          // La cámara elegida ya no está: seguir con la predeterminada en vez de quedar sin lecturas.
+          stream = await navigator.mediaDevices.getUserMedia(constraints(null));
+          toast("La cámara configurada no está disponible; se usa la cámara predeterminada.", "warn");
+        }
         const video = document.createElement("video");
         video.muted = true;
         video.playsInline = true;
@@ -454,6 +464,7 @@
   async function setRunning(on) {
     App.running = on;
     await App.store.setKV("running", on);
+    extensionSync();
     if (on) {
       if (App.settings.frameSource === "camera" && App.cam.status !== "active") await startCameras();
       App.nextAt = Date.now();
@@ -465,8 +476,23 @@
     renderHeader();
   }
 
+  // Dentro de la extensión: la pestaña no se descarta por ahorro de memoria y el
+  // service worker sabe si debe reabrir la app cuando Chrome se inicia.
+  function extensionSync() {
+    if (!App.isExtension || typeof chrome === "undefined") return;
+    try { chrome.storage && chrome.storage.local.set({ running: !!App.running }); } catch (e) { /* opcional */ }
+    try {
+      chrome.tabs && chrome.tabs.getCurrent((tab) => {
+        if (tab && tab.id != null) chrome.tabs.update(tab.id, { autoDiscardable: false }, () => void chrome.runtime.lastError);
+      });
+    } catch (e) { /* opcional */ }
+  }
+
   function tick() {
     if (window.MonThermalUI) window.MonThermalUI.poll(false);
+    // Si la cámara se desconectó o falló, reintentar sola cada 30 s mientras el monitoreo siga en curso.
+    if (App.running && App.settings.frameSource === "camera" && (App.cam.status === "error" || App.cam.status === "off") &&
+        Date.now() - (App.cam.lastTry || 0) > 30000) startCameras();
     if (App.running && !App.busy && Date.now() >= App.nextAt) runCycle("timer");
     renderHeader();
   }
@@ -1464,7 +1490,7 @@
       parts.push("<p>✓ Estás usando la <b>extensión de Chrome</b>. Ábrela desde el ícono de BioTeva en la barra de extensiones (fíjala con el ícono de la pieza de rompecabezas).</p>");
     } else {
       parts.push('<p><b>Instalar en este computador (app de escritorio):</b> ' + (App.installPrompt ? '<button class="btn primary small" id="installBtn2" type="button">⊕ Instalar ahora</button>' : "en Chrome abre el menú ⋮ → <i>Transmitir, guardar y compartir</i> → <i>Instalar página como app</i> (o el ícono ⊕ de la barra de direcciones).") + " Se abre en su propia ventana, con ícono en el escritorio y el menú Inicio, y funciona sin internet.</p>");
-      parts.push('<p><b>Extensión de Chrome:</b> <a href="download/bioteva-monitor-extension.zip" download>descargar la extensión (.zip)</a>. Descomprímela, abre <span class="mono">chrome://extensions</span>, activa <i>Modo de desarrollador</i> y pulsa <i>Cargar descomprimida</i> sobre la carpeta.</p>');
+      parts.push('<p><b>Extensión de Chrome:</b> <a href="download/bioteva-monitor-extension.zip" download>descargar la extensión (.zip)</a>. Chrome <b>no</b> la instala desde el .zip: primero «Extraer todo» en una carpeta que no vayas a borrar (p. ej. <span class="mono">Documentos\BioTeva\extension</span>), luego abre <span class="mono">chrome://extensions</span>, activa <i>Modo de desarrollador</i> y pulsa <i>Cargar descomprimida</i> sobre esa carpeta (la que contiene <span class="mono">manifest.json</span>). Si luego borras o mueves la carpeta, la extensión deja de funcionar. Instrucciones completas en <span class="mono">INSTALAR.txt</span> dentro del .zip.</p>');
       parts.push('<p class="hint">Dirección actual: <span class="mono">' + esc(origin + location.pathname) + "</span></p>");
     }
     return parts.join("");
@@ -1589,6 +1615,7 @@
     startTicker();
     previewLoop();
 
+    extensionSync();
     // Reanudar tras un reinicio de la app si el monitoreo estaba en curso.
     if (await App.store.getKV("running")) {
       toast("Reanudando el monitoreo que estaba en curso…");
