@@ -3,7 +3,7 @@
 Monitoreo ambiental por cámara (termohigrómetros HTC-2, lectura de 7 segmentos en el navegador) y control térmico de cajas de grillos (*Acheta domesticus*).
 
 - **Abrir la app:** https://bioteva-col.github.io/bioteva-monitor/
-- **Paquete portátil para Windows** (app + gateway térmico + extensión de Chrome + instaladores): [download/BioTeva-Monitor-Portable.zip](download/BioTeva-Monitor-Portable.zip)
+- **Paquete portátil para Windows** (extraer y doble clic en `INSTALAR BioTeva Monitor.cmd`: queda arrancando sola al encender el equipo): [download/BioTeva-Monitor-Portable.zip](download/BioTeva-Monitor-Portable.zip)
 - **Extensión de Chrome:** [download/bioteva-monitor-extension.zip](download/bioteva-monitor-extension.zip)
 
 ## Instalar la extensión de Chrome
