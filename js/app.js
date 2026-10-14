@@ -54,19 +54,50 @@
   const sensorById = (id) => App.sensors.find((s) => s.id === id);
   const sevClass = (sev) => (sev === "CRITICAL" ? "crit" : sev === "WARNING" ? "warn" : "info");
 
+  // Íconos del sistema de diseño: el estado nunca se comunica solo con color (color + ícono + palabra).
+  const ICONS = {
+    ok: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    warn: '<path d="M12 3.5l9.5 16.5h-19z"/><path d="M12 10v4.5M12 17.2v.1"/>',
+    crit: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.2v.1"/>',
+    off: '<path d="M6 12h12"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.8v.1"/>',
+    up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+    flat: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+    lamp: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z"/>',
+  };
+  const ico = (name, size) => '<svg width="' + (size || 18) + '" height="' + (size || 18) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || "") + "</svg>";
+
   const STATUS_UI = {
-    NORMAL: { icon: "✓", cls: "good" },
-    ATENCION: { icon: "!", cls: "warn" },
-    FUERA_DE_RANGO: { icon: "▲", cls: "crit" },
-    SIN_DATOS: { icon: "∅", cls: "muted" },
-    LECTURA_INCIERTA: { icon: "?", cls: "warn" },
-    CAMARA_DESCONECTADA: { icon: "✕", cls: "crit" },
-    SENSOR_NO_DETECTADO: { icon: "⌖", cls: "crit" },
+    NORMAL: { cls: "ok", box: "ok", icon: "ok", label: "Normal" },
+    ATENCION: { cls: "warn", box: "warn", icon: "warn", label: "Atención" },
+    FUERA_DE_RANGO: { cls: "crit", box: "crit", icon: "crit", label: "Fuera de límites" },
+    SIN_DATOS: { cls: "off", box: "dashed", icon: "off", label: "Sin datos" },
+    LECTURA_INCIERTA: { cls: "warn", box: "warn", icon: "warn", label: "Lectura dudosa" },
+    CAMARA_DESCONECTADA: { cls: "crit", box: "crit", icon: "crit", label: "Cámara desconectada" },
+    SENSOR_NO_DETECTADO: { cls: "crit", box: "crit", icon: "crit", label: "Sensor no visible" },
   };
   function statusChip(code) {
     const ui = STATUS_UI[code] || STATUS_UI.SIN_DATOS;
-    return '<span class="chip ' + ui.cls + '"><span class="chip-icon" aria-hidden="true">' + ui.icon + "</span>" + esc((L.STATUS_LABELS[code] || code).toUpperCase()) + "</span>";
+    return '<span class="chip ' + ui.cls + '">' + ico(ui.icon, 16) + esc(ui.label) + "</span>";
   }
+
+  // ── formatos: coma decimal por defecto, horas «3:47 p. m.», tiempos «hace 2 min» ──
+  App.ui = { decimal: "," };
+  const fmt = (v, d) => { const s = L.num(v, d); return App.ui.decimal === "," ? s.replace(".", ",") : s; };
+  /** Textos armados por la lógica («31.2 °C») con el separador decimal elegido. */
+  const decTxt = (t) => (App.ui.decimal === "," ? String(t == null ? "" : t).replace(/(\d)\.(\d)/g, "$1,$2") : String(t == null ? "" : t));
+  const fmtHour = (ms) => new Date(ms).toLocaleTimeString("es-CO", { hour: "numeric", minute: "2-digit" });
+  const fmtDay = (ms) => {
+    const k = L.dayKey(ms), now = Date.now();
+    if (k === L.dayKey(now)) return "Hoy";
+    if (k === L.dayKey(now - DAY)) return "Ayer";
+    return new Date(ms).toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long" });
+  };
+  const fmtWhen = (ms) => (L.dayKey(ms) === L.dayKey(Date.now()) ? fmtHour(ms) : fmtDay(ms).toLowerCase() + ", " + fmtHour(ms));
+  const fmtDur = (ms) => { const m = Math.max(0, Math.round(ms / 60000)); return m < 60 ? m + " min" : Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : ""); };
+  const fmtAgo = (ms) => { const d = Date.now() - ms; return d < 60000 ? "hace un momento" : d < DAY ? "hace " + fmtDur(d) : fmtWhen(ms); };
+  const parseNum = (s) => { const n = Number(String(s == null ? "" : s).trim().replace(",", ".")); return String(s == null ? "" : s).trim() === "" || !isFinite(n) ? null : n; };
   function sevChip(sev) {
     const icon = sev === "CRITICAL" ? "⬣" : sev === "WARNING" ? "▲" : "i";
     return '<span class="chip ' + sevClass(sev) + '"><span class="chip-icon" aria-hidden="true">' + icon + "</span>" + esc(sev) + "</span>";
@@ -521,44 +552,48 @@
 
   // ─────────────────────────── cabecera ───────────────────────────
 
+  function nextIn() {
+    if (!App.running || !App.nextAt) return "";
+    const s = Math.max(0, Math.round((App.nextAt - Date.now()) / 1000));
+    return s < 60 ? s + " s" : Math.ceil(s / 60) + " min";
+  }
+
   function renderHeader() {
-    const S = App.settings;
-    const cam = $("#camPill");
-    if (S.frameSource === "simulation") { cam.textContent = "SIMULACIÓN"; cam.className = "pill info"; }
-    else if (S.frameSource === "image") { cam.textContent = App.still ? "IMAGEN ESTÁTICA" : "SIN IMAGEN"; cam.className = "pill " + (App.still ? "info" : "warn"); }
-    else {
-      const map = { off: ["CAMERA OFF", "muted"], starting: ["CAMERA STARTING", "warn"], active: ["CAMERA ACTIVE", "good"], error: ["CAMERA ERROR", "crit"] };
-      const m = map[App.cam.status] || map.off;
-      cam.textContent = m[0];
-      cam.className = "pill " + m[1];
-      cam.title = App.cam.error || "";
-    }
-    const run = $("#runPill");
-    run.textContent = App.running ? (App.busy ? "LEYENDO…" : "MONITOREO EN CURSO") : "DETENIDO";
-    run.className = "pill " + (App.running ? "good" : "muted");
-    $("#lastPill").textContent = "LAST READING: " + (App.lastCycleAt ? fmtClock(App.lastCycleAt) : "—");
-    if (App.running && App.nextAt) {
-      const s = Math.max(0, Math.round((App.nextAt - Date.now()) / 1000));
-      $("#nextPill").textContent = "NEXT READING: " + pad2(Math.floor(s / 60)) + ":" + pad2(s % 60);
-    } else $("#nextPill").textContent = "NEXT READING: —";
-    const btn = $("#runBtn");
-    btn.textContent = App.running ? "■ Detener monitoreo" : "▶ Iniciar monitoreo";
+    const S = App.settings, pill = $("#statusPill");
+    let cls = "", text = "Detenido";
+    const camBad = S.frameSource === "camera" && App.cam.status === "error";
+    if (camBad) { cls = "crit"; text = "La cámara no responde"; }
+    else if (App.running && App.busy) { cls = "info"; text = "Leyendo…"; }
+    else if (App.running) { cls = "good"; text = "Monitoreando · próxima lectura en " + nextIn(); }
+    if (S.frameSource === "simulation") text += " · simulación";
+    pill.className = "status-pill " + cls;
+    pill.title = camBad ? App.cam.error || "" : App.lastCycleAt ? "Última lectura: " + fmtWhen(App.lastCycleAt) : "";
+    if ($("#statusText").textContent !== text) $("#statusText").textContent = text;
+    const btn = $("#runBtn"), label = App.running ? "Pausar" : "▶ Iniciar monitoreo";
+    if (btn.textContent !== label) btn.textContent = label;
     btn.classList.toggle("primary", !App.running);
+    const dn = $("#dashNext");
+    if (dn) dn.textContent = App.running ? nextIn() || "ahora" : "detenido";
+  }
+
+  /** Episodios de alerta de los últimos días (los «Activos» son los que cuenta el globo rojo). */
+  async function loadEpisodes(days) {
+    const now = Date.now();
+    const [evs, rs] = await Promise.all([App.store.eventsRange(now - days * DAY, now), App.store.readingsRange(now - Math.min(days, 7) * DAY, now)]);
+    return L.alertEpisodes(evs, rs, App.sensors, App.settings, now);
   }
 
   async function updateAlertCount() {
     const now = Date.now();
-    const evs = await App.store.eventsRange(now - 30 * DAY, now);
-    const n = evs.filter((e) => e.severity !== "INFO" && !e.ack).length;
-    const el = $("#alertCount");
-    el.textContent = n;
-    el.classList.toggle("hot", n > 0);
+    const evs = await App.store.eventsRange(now - 7 * DAY, now);
+    const n = L.alertEpisodes(evs, [], App.sensors, App.settings, now).filter((e) => e.status === "Activa").length;
+    ["#alertCount", "#alertCount2"].forEach((sel) => { const el = $(sel); if (!el) return; el.textContent = n; el.classList.toggle("hot", n > 0); el.hidden = !n; });
   }
 
   async function renderBanners() {
     const out = [];
-    if (App.settings.frameSource === "simulation") out.push('<div class="banner info"><b>Modo simulación activo.</b> Los valores son ficticios y quedan marcados como «simulación». Cámbialo en <b>Cámara → Fuente de imagen</b>.</div>');
-    else if (await App.store.hasSimulated()) out.push('<div class="banner info">Hay datos simulados guardados junto con los reales. Se identifican en la columna «Fuente» y puedes borrarlos en <b>Configuración → Simulación</b>.</div>');
+    if (App.settings.frameSource === "simulation") out.push('<div class="banner info">' + ico("info", 20) + '<span><b>Modo simulación.</b> Los valores son de prueba y quedan marcados como «simulación». Cámbialo en <b>Ajustes → Lecturas y cámara</b>.</span></div>');
+    else if (await App.store.hasSimulated()) out.push('<div class="banner info">' + ico("info", 20) + '<span>Hay datos de prueba (simulación) guardados junto con los reales. Están marcados y puedes borrarlos en <b>Ajustes → Avanzado</b>.</span></div>');
     if (!window.isSecureContext) out.push('<div class="banner warn">Esta página no está en un origen seguro: Chrome no permitirá la cámara. Ábrela como extensión, en http://localhost o por https.</div>');
     if (App.running && App.settings.frameSource === "camera") out.push('<div class="banner muted">Mantén esta ventana abierta y el equipo encendido: si se cierra, se suspende o se apaga, las lecturas se detienen y se registrará un periodo sin datos.</div>');
     $("#banners").innerHTML = out.join("");
@@ -566,11 +601,23 @@
 
   // ─────────────────────────── navegación ───────────────────────────
 
+  // 4 secciones principales; todo lo demás vive dentro de «Ajustes» (menú lateral).
+  const GROUP = (v) => (v === "dashboard" || v === "caja" || v === "alertas" ? v : "ajustes");
+
   function showView(name) {
+    if (name === "ajustes") name = App.lastSettings || "sensores";
+    if (!$('main > section[data-view="' + name + '"]')) name = "dashboard";
+    if (name === "calibracion" && App.view !== "calibracion") App.cal.step = 1;
     App.view = name;
-    $$("#tabs .tab").forEach((t) => t.setAttribute("aria-selected", t.dataset.view === name ? "true" : "false"));
+    const g = GROUP(name), inSettings = g === "ajustes" && name !== "calibracion";
+    if (g === "ajustes" && name !== "calibracion") App.lastSettings = name;
+    $$("#tabs .tab, #bottomNav button").forEach((t) => t.setAttribute("aria-selected", t.dataset.view === g ? "true" : "false"));
+    $$("#sideNav button").forEach((b) => (b.dataset.view === name ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")));
+    $("#sideNav").hidden = !inSettings;
+    $("#main").classList.toggle("settings-mode", inSettings);
     $$("main > section").forEach((s) => (s.hidden = s.dataset.view !== name));
     if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+    window.scrollTo(0, 0);
     renderView();
   }
 
@@ -579,6 +626,8 @@
     updateAlertCount();
     switch (App.view) {
       case "dashboard": return renderDashboard();
+      case "caja": return renderCaja();
+      case "datos": return renderDatos();
       case "camara": return renderCameraForm();
       case "calibracion": return openCalibration();
       case "termico": return window.MonThermalUI ? window.MonThermalUI.render() : null;
@@ -592,86 +641,182 @@
     }
   }
 
-  // ─────────────────────────── DASHBOARD ───────────────────────────
+  // ─────────────────────────── INICIO ───────────────────────────
+
+  /** Valor de una lectura: el confiable, o el dudoso aparte (se muestra tachado y no se usa). */
+  function shownValue(last, k) {
+    if (!last) return { v: null, doubt: null };
+    if (last[k] != null) return { v: last[k], doubt: null };
+    const raw = last.fields && last.fields[k];
+    return { v: null, doubt: raw && raw.value != null ? raw.value : null };
+  }
+  const outOf = (v, mn, mx) => v != null && ((mx != null && v > mx) || (mn != null && v < mn));
+
+  /** Desde cuándo la serie está fuera de los límites (racha final), o null. */
+  function outSince(rows, k, mn, mx) {
+    let since = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const v = rows[i][k];
+      if (v == null) continue;
+      if (outOf(v, mn, mx)) since = rows[i].ts; else break;
+    }
+    return since;
+  }
+
+  function trendHtml(rows, k, unit) {
+    const sl = L.slopePerMin(rows.map((r) => ({ ts: r.ts, v: r[k] })));
+    if (sl == null) return "";
+    const perH = sl * 60, dir = Math.abs(perH) < 0.2 ? "flat" : perH > 0 ? "up" : "down";
+    return "<b>" + ico(dir, 18) + esc(dir === "flat" ? "Estable" : (dir === "up" ? "Subiendo " : "Bajando ") + fmt(Math.abs(perH)) + " " + unit + "/h") + "</b>";
+  }
+
+  function rangeHtml(v, mn, mx, unit, dec) {
+    if (mn == null || mx == null) return "";
+    const span = mx - mn || 1;
+    let lo = mn - span * 0.6, hi = mx + span * 0.6;
+    if (v != null) { lo = Math.min(lo, v - span * 0.15); hi = Math.max(hi, v + span * 0.15); }
+    const pos = (x) => (((x - lo) / (hi - lo)) * 100).toFixed(1);
+    return '<div class="range" aria-hidden="true"><div class="range-bar"><div class="range-ok" style="left:' + pos(mn) + "%;width:" + (pos(mx) - pos(mn)).toFixed(1) + '%"></div>' +
+      (v != null ? '<div class="range-mark' + (outOf(v, mn, mx) ? " crit" : "") + '" style="left:' + pos(v) + '%"></div>' : "") + "</div>" +
+      '<div class="range-labels"><span style="left:' + pos(mn) + '%">' + fmt(mn, dec) + '</span><span style="left:' + pos(mx) + '%">' + fmt(mx, dec) + " " + unit + "</span></div></div>";
+  }
+
+  function thermalStatus() { return window.MonThermalUI && window.MonThermalUI.getStatus ? window.MonThermalUI.getStatus() : null; }
+  function thermalBoxFor(sensorId) {
+    const st = thermalStatus();
+    return st && st.boxes ? st.boxes.find((b) => b.enabled && b.sensorId === sensorId) || null : null;
+  }
+  const MODE_TXT = { AUTO: "Automático", MANUAL_ON: "Manual · encendida", MANUAL_OFF: "Manual · apagada" };
+  function lampLine(bx) {
+    if (!bx) return "";
+    const stt = bx.state || {};
+    if (stt.safety) return '<div class="lamp-line crit">' + ico("crit") + "<b>Lámpara apagada por seguridad</b><span>se calentó de más</span></div>";
+    if (bx.device === "UNREACHABLE" || stt.heater === "UNREACHABLE") return '<div class="lamp-line crit">' + ico("crit") + "<b>Sin comunicación con el enchufe</b></div>";
+    const on = stt.heater === "ON";
+    return '<div class="lamp-line' + (on ? " on" : "") + '">' + ico("lamp") + "<b>Lámpara " + (on ? "encendida" : "apagada") + "</b><span>· " + esc(MODE_TXT[bx.mode] || bx.mode || "") + (on && stt.onSince ? " · desde " + esc(fmtHour(stt.onSince)) : "") + "</span></div>";
+  }
+
+  function boxCard(s, last, st, todayRows, hourRows) {
+    const ui = STATUS_UI[st.code] || STATUS_UI.SIN_DATOS;
+    const ck = L.controlKey(s), other = ck === "tempOut" ? "tempIn" : "tempOut";
+    const noData = st.code === "SIN_DATOS";
+    const t = shownValue(last, ck), h = shownValue(last, "humidity"), o = shownValue(last, other);
+    const tOut = outOf(t.v, s.tempMin, s.tempMax);
+    let hero;
+    if (noData || (t.v == null && t.doubt == null)) hero = '<span class="hero-num off" aria-label="sin dato">– –</span>';
+    else if (t.v == null) hero = '<span class="hero-num struck" title="Lectura dudosa: no se usa">' + fmt(t.doubt) + "<small>°C</small></span>";
+    else hero = '<span class="hero-num' + (tOut ? " crit" : "") + '">' + fmt(t.v) + "<small>°C</small></span>";
+    let note = "";
+    if (noData) note = '<p class="range-note off">' + esc(st.note || "Sin lecturas") + "</p>";
+    else if (t.v == null && t.doubt != null) note = '<p class="range-note warn">La app no está segura de este número y no lo usa. Si pasa seguido, calibra de nuevo.</p>';
+    else if (s.tempMin == null && s.tempMax == null) note = '<p class="range-note off">Sin límites configurados · <a href="#sensores" data-go="sensores">Poner límites</a></p>';
+    else if (tOut) {
+      const since = outSince(todayRows, ck, s.tempMin, s.tempMax);
+      const d = s.tempMax != null && t.v > s.tempMax ? fmt(t.v - s.tempMax) + " °C sobre el máximo" : fmt(s.tempMin - t.v) + " °C bajo el mínimo";
+      note = '<p class="range-note crit">' + esc(d) + (since ? " · fuera desde " + esc(fmtWhen(since)) : "") + "</p>";
+    } else if (t.v != null) note = '<p class="range-note">Dentro de tus límites</p>';
+    const kvv = (x, unit, dec, crit) =>
+      x.v != null ? '<span class="v md' + (crit ? " crit" : "") + '">' + fmt(x.v, dec) + " " + unit + "</span>"
+      : x.doubt != null ? '<span class="v md struck" title="Lectura dudosa">' + fmt(x.doubt, dec) + " " + unit + "</span>"
+      : '<span class="v md">– –</span>';
+    const humLim = s.humMin == null && s.humMax == null ? "sin límites" : "tus límites " + (s.humMin != null ? fmt(s.humMin, 0) : "–") + "–" + (s.humMax != null ? fmt(s.humMax, 0) : "–") + " %";
+    return '<article class="box ' + ui.box + '">' +
+      '<div class="box-head"><h2>' + esc(s.name) + (s.enabled ? "" : " (apagado)") + "</h2>" + statusChip(st.code) + "</div>" +
+      '<div class="box-body">' +
+        '<span class="box-label">' + (ck === "tempOut" ? "Temperatura de la caja (OUT)" : "Temperatura (IN)") + "</span>" +
+        '<div class="hero">' + hero + '<div class="trend">' + (noData ? "" : trendHtml(hourRows, ck, "°C")) + "<span>" + (last ? esc(fmtAgo(last.ts)) : "aún sin lecturas") + (last && last.source === "simulation" ? ' · <span class="tag">simulación</span>' : "") + "</span></div></div>" +
+        (noData ? "" : rangeHtml(t.v, s.tempMin, s.tempMax, "°C", 1)) + note +
+        '<div class="duo"><div class="kv"><span>Humedad</span>' + kvv(noData ? {} : h, "%", 0, outOf(h.v, s.humMin, s.humMax)) + '<span class="s">' + esc(humLim) + "</span></div>" +
+        '<div class="kv"><span>' + (other === "tempIn" ? "Temp. del cuarto (IN)" : "Temp. de la caja (OUT)") + "</span>" + kvv(noData ? {} : o, "°C", 1, false) + "</div></div>" +
+        lampLine(thermalBoxFor(s.id)) +
+      "</div>" +
+      '<button class="box-foot" type="button" data-caja="' + esc(s.id) + '">Ver gráfica de hoy <span aria-hidden="true">→</span></button>' +
+    "</article>";
+  }
+
+  const ACT_LVL = { crit: "YA", warn: "PRONTO", info: "INFO", good: "OK" };
+  const ACT_KIND = { manejo: "Manejo", accidente: "Riesgo", sistema: "Sistema" };
+  /** Botón de la tarjeta «Qué hacer ahora»: [texto, acción, destino]. */
+  function actButton(t) {
+    if (t.level === "good") return null;
+    if (/leyendo bien/.test(t.title)) return ["Ir a calibrar", "go", "calibracion"];
+    if (/sin límites/.test(t.title)) return ["Poner límites", "go", "sensores"];
+    if (/no llegan lecturas/.test(t.title)) return App.running ? ["Revisar la cámara", "go", "camara"] : ["▶ Iniciar monitoreo", "run", ""];
+    if (t.kind === "accidente") return ["Ver lámparas", "go", "termico"];
+    if (t.sensorId) return ["Ver gráfica", "caja", t.sensorId];
+    return null;
+  }
 
   async function renderDashboard() {
     const host = $('section[data-view="dashboard"]');
     const now = Date.now(), S = App.settings;
     const dayStart = L.dayBounds(L.dayKey(now)).from;
-    const today = await App.store.readingsRange(dayStart, now);
-    const cards = [];
-    // «Qué hacer ahora»: acciones concretas a partir de las lecturas, tus límites y las lámparas
-    const [recent3h, events24h] = await Promise.all([App.store.readingsRange(now - 3 * HOUR, now), App.store.eventsRange(now - DAY, now)]);
-    const todo = L.actionItems({ sensors: App.sensors, readings: recent3h, events: events24h, thermal: window.MonThermalUI && window.MonThermalUI.getStatus ? window.MonThermalUI.getStatus() : null, running: App.running, now, settings: S });
-    const KIND = { manejo: "Manejo", accidente: "Riesgo", sistema: "Sistema" };
-    const todoHtml = '<div class="panel todo"><header><h2>Qué hacer ahora</h2></header><div class="panel-body"><ul class="todo-list">' +
-      todo.map((t) => '<li class="todo-item ' + t.level + '"><span class="todo-tag">' + esc(t.level === "good" ? "OK" : KIND[t.kind] || "") + '</span><div><b>' + esc(t.title) + "</b><p>" + esc(t.action) + "</p></div></li>").join("") +
-      "</ul></div></div>";
+    const [today, recent3h, events24h] = await Promise.all([App.store.readingsRange(dayStart, now), App.store.readingsRange(now - 3 * HOUR, now), App.store.eventsRange(now - DAY, now)]);
+    today.sort((a, b) => a.ts - b.ts);
+    const thermal = thermalStatus();
+    const todo = L.actionItems({ sensors: App.sensors, readings: recent3h, events: events24h, thermal, running: App.running, now, settings: S });
+
+    const cards = [], resumen = [];
     for (const s of App.sensors) {
       const last = App.latest[s.id] || (await App.store.lastReading(s.id));
       if (last) App.latest[s.id] = last;
       const st = L.currentStatus(s, last, now, S);
-      const ck = L.controlKey(s);
       const mine = today.filter((r) => r.sensorId === s.id);
-      const dT = L.describe(mine.map((r) => r[ck])), dH = L.describe(mine.map((r) => r.humidity));
-      const hour = mine.filter((r) => r.ts >= now - HOUR);
-      const hT = L.describe(hour.map((r) => r[ck])), hH = L.describe(hour.map((r) => r.humidity));
-      const val = (k, unit, dec) => {
-        const v = last ? last[k] : null;
-        const raw = last && last.fields && last.fields[k];
-        const shown = v != null ? L.num(v, dec) : raw && raw.value != null ? L.num(raw.value, dec) : "—";
-        const doubt = v == null && raw && raw.value != null;
-        return '<span class="v' + (doubt ? " doubt" : "") + '">' + esc(shown) + (shown !== "—" ? " <small>" + unit + "</small>" : "") + "</span>" + (doubt ? '<span class="sub warn">no confiable (' + esc(L.LEVEL_LABELS[raw.level]) + ")</span>" : "");
-      };
-      const delta = (d, unit) => (d == null ? "" : '<span class="sub">' + esc(L.signed(d)) + " " + unit + " vs anterior</span>");
-      const limT = s.tempMin == null && s.tempMax == null ? null : (s.tempMin != null ? L.num(s.tempMin) : "—") + "–" + (s.tempMax != null ? L.num(s.tempMax) : "—") + " °C";
-      const limH = s.humMin == null && s.humMax == null ? null : (s.humMin != null ? L.num(s.humMin, 0) : "—") + "–" + (s.humMax != null ? L.num(s.humMax, 0) : "—") + " %";
-      cards.push(
-        '<article class="sensor-card ' + (STATUS_UI[st.code] || {}).cls + '">' +
-          "<header><h2>" + esc(s.name) + (s.enabled ? "" : " (desactivado)") + '</h2><div class="spacer"></div>' + statusChip(st.code) + "</header>" +
-          '<div class="vals">' +
-            '<div class="val"><span class="k">IN · ambiente' + (ck === "tempIn" ? " · control" : "") + "</span>" + val("tempIn", "°C", 1) + (ck === "tempIn" && last ? delta(last.deltaTemp, "°C") : "") + "</div>" +
-            '<div class="val"><span class="k">OUT · caja' + (ck === "tempOut" ? " · control" : "") + "</span>" + val("tempOut", "°C", 1) + (ck === "tempOut" && last ? delta(last.deltaTemp, "°C") : "") + "</div>" +
-            '<div class="val"><span class="k">Humidity</span>' + val("humidity", "%", 0) + (last ? delta(last.deltaHum, "%") : "") + "</div>" +
-            '<div class="val"><span class="k">Hora del display</span><span class="v small">' + esc((last && last.displayTime) || "—") + "</span></div>" +
-          "</div>" +
-          (st.note ? '<p class="note warn">' + esc(st.note) + "</p>" : "") +
-          '<dl class="meta">' +
-            "<div><dt>Última lectura</dt><dd>" + (last ? esc(L.fmtDateTime(last.ts)) + (last.source === "simulation" ? ' <span class="tag">simulación</span>' : "") : "—") + "</dd></div>" +
-            "<div><dt>Confianza OCR</dt><dd>" + (last && last.confidence != null ? esc(L.num(last.confidence, 0)) + " % · " + esc(L.LEVEL_LABELS[last.level]) : "—") + "</dd></div>" +
-            "<div><dt>Hoy (" + (ck === "tempOut" ? "OUT" : "IN") + ")</dt><dd>" + (dT.n ? "mín " + L.num(dT.min) + " · máx " + L.num(dT.max) + " · prom " + L.num(dT.mean) + " °C" : "sin datos") + "</dd></div>" +
-            "<div><dt>Hoy (humedad)</dt><dd>" + (dH.n ? L.num(dH.min, 0) + "–" + L.num(dH.max, 0) + " % · prom " + L.num(dH.mean) + " %" : "sin datos") + "</dd></div>" +
-            "<div><dt>Última hora</dt><dd>" + (hT.n ? "prom " + L.num(hT.mean) + " °C · " + L.num(hH.mean) + " %" : "sin datos") + "</dd></div>" +
-            "<div><dt>Ubicación de la pantalla</dt><dd>" + esc(trackText(s)) + "</dd></div>" +
-            (() => { const o = L.minutesOutOfRange(mine, s, now, S); const out = o.tempHigh + o.tempLow + o.humHigh + o.humLow; return s.tempMin == null && s.tempMax == null && s.humMin == null && s.humMax == null ? "" : "<div><dt>Hoy fuera de tus límites</dt><dd>" + (out ? esc(fmtMinutes(o.tempHigh + o.tempLow)) + " temp. · " + esc(fmtMinutes(o.humHigh + o.humLow)) + " humedad" : "nada") + "</dd></div>"; })() +
-            "<div><dt>Límites</dt><dd>" + (limT || limH ? esc([limT && "Temp. " + limT, limH && "Hum. " + limH].filter(Boolean).join(" · ")) : '<a href="#sensores" data-go="sensores">sin límites configurados</a>') + "</dd></div>" +
-          "</dl>" +
-        "</article>",
-      );
+      const hour = recent3h.filter((r) => r.sensorId === s.id && r.ts >= now - HOUR);
+      cards.push(boxCard(s, last, st, mine, hour));
+      if (!s.enabled) continue;
+      const ck = L.controlKey(s), d = L.describe(mine.map((r) => r[ck]));
+      const o = L.minutesOutOfRange(mine, s, now, S), outMin = o.tempHigh + o.tempLow, outH = o.humHigh + o.humLow;
+      const hasLim = s.tempMin != null || s.tempMax != null || s.humMin != null || s.humMax != null;
+      resumen.push('<div class="kv"><span>' + esc(s.name) + "</span>" +
+        (d.n ? '<span class="v sm">' + fmt(d.min) + " – " + fmt(d.max) + " °C</span>" : '<span class="v sm">– –</span>') +
+        '<span class="s">' + (!d.n ? "sin lecturas hoy" : !hasLim ? "sin límites configurados" : outMin + outH ? "fuera de límites: " + esc(fmtDur(outMin * 60000)) + " temp. · " + esc(fmtDur(outH * 60000)) + " humedad" : "todo el día dentro de tus límites") + "</span></div>");
     }
 
-    const evs = (await App.store.eventsRange(now - 7 * DAY, now)).filter((e) => e.severity !== "INFO" && !e.ack).sort((a, b) => b.ts - a.ts).slice(0, 6);
-    host.innerHTML =
-      '<div class="dash-top">' +
-        '<div class="panel next"><div class="panel-body"><span class="k">NEXT READING</span><span class="big mono" id="dashNext">—</span>' +
-        '<span class="sub">Cada ' + esc(intervalLabel(S.intervalSec)) + " · fuente: " + esc({ camera: "cámara", image: "imagen estática", simulation: "simulación" }[S.frameSource]) + "</span></div></div>" +
-        '<div class="panel preview-mini"><canvas id="dashPreview" width="1280" height="720" aria-label="Vista previa en vivo"></canvas></div>' +
-      "</div>" +
-      todoHtml +
-      '<div class="sensor-grid">' + cards.join("") + "</div>" +
-      (window.MonThermalUI ? window.MonThermalUI.dashboardHtml() : "") +
-      '<div class="panel"><header><h2>¿Hubo cambios importantes hoy?</h2><div class="spacer"></div><button class="btn" id="askToday" type="button">Analizar hoy</button></header><div class="panel-body"><div id="todayAnswer" class="answer muted-text">Pulsa «Analizar hoy» para revisar cambios bruscos, tendencias, valores fuera de rango, periodos sin datos y lecturas sospechosas.</div></div></div>' +
-      '<div class="panel"><header><h2>Alertas sin reconocer</h2><div class="spacer"></div><a class="btn ghost" href="#alertas" data-go="alertas">Ver todas</a></header><div class="panel-body">' +
-        (evs.length ? '<ul class="events">' + evs.map(eventItem).join("") + "</ul>" : '<p class="muted-text">Sin alertas pendientes.</p>') +
+    const todoHtml = '<aside class="todo-col col"><div class="todo-head"><h2>Qué hacer ahora</h2><span class="muted-text">' + esc(fmtHour(now)) + "</span></div>" +
+      todo.map((t, i) => {
+        const b = actButton(t);
+        return '<div class="act ' + t.level + '"><div class="act-meta"><span class="lvl">' + ACT_LVL[t.level] + "</span>" + (t.level !== "good" ? '<span class="kind">' + esc(ACT_KIND[t.kind] || "") + "</span>" : "") + "</div>" +
+          '<div class="act-title">' + esc(decTxt(t.title)) + "</div><p>" + esc(decTxt(t.action)) + "</p>" +
+          (b ? '<div><button class="btn on-act" type="button" data-act="' + i + '">' + esc(b[0]) + "</button></div>" : "") + "</div>";
+      }).join("") + "</aside>";
+
+    const boxes = thermal && thermal.boxes ? thermal.boxes.filter((b) => b.enabled) : [];
+    const lampsHtml = '<div class="panel"><header><h2>Lámparas</h2><div class="spacer"></div><a class="btn ghost small" href="#termico" data-go="termico">Abrir →</a></header><div class="panel-body">' +
+      (boxes.length
+        ? boxes.map((b) => { const on = b.state && b.state.heater === "ON"; return '<div class="lamp-row"><b>' + esc(b.name) + '</b><span class="chip soft ' + (on ? "warn" : "") + '">' + ico("lamp", 16) + (on ? "Encendida" : "Apagada") + '</span><span class="muted-text">' + esc(MODE_TXT[b.mode] || b.mode || "") + "</span></div>"; }).join("")
+        : '<p class="muted-text">' + (window.MonThermalUI && window.MonThermalUI.online === false ? "El control de lámparas no está conectado en este computador. La lectura de los sensores sigue funcionando." : "No hay lámparas configuradas.") + "</p>") +
       "</div></div>";
+    const srcTxt = { camera: { active: "Cámara activa", starting: "Encendiendo la cámara…", error: "La cámara no responde", off: "Cámara apagada" }[App.cam.status] || "Cámara apagada", image: "Imagen de prueba", simulation: "Simulación (datos de prueba)" }[S.frameSource];
+    const camHtml = '<div class="panel"><header><h2>Cámara</h2></header><div class="panel-body"><div class="cam-mini"><canvas id="dashPreview" width="1280" height="720" aria-label="Vista previa de la cámara"></canvas>' +
+      '<div class="col" style="gap:6px"><b>' + esc(srcTxt) + '</b><span class="muted-text">Lee cada ' + esc(intervalLabel(S.intervalSec)) + ' · próxima: <b id="dashNext">' + esc(App.running ? nextIn() || "ahora" : "detenido") + "</b></span>" +
+      '<div class="row-actions"><button class="btn small" type="button" id="dashNow">Leer ahora</button><a class="btn ghost small" href="#calibracion" data-go="calibracion">Calibrar</a></div></div></div></div></div>';
+
+    host.innerHTML =
+      '<div class="home"><div class="boxes">' + cards.join("") + "</div>" + todoHtml + "</div>" +
+      '<div class="trio">' +
+        '<div class="panel"><header><h2>Hoy en resumen</h2></header><div class="panel-body col">' + (resumen.join("") || '<p class="muted-text">No hay sensores activos.</p>') +
+          '<button class="btn small" id="askToday" type="button">¿Hubo cambios importantes hoy?</button><div id="todayAnswer" class="answer" hidden></div></div></div>' +
+        lampsHtml + camHtml +
+      "</div>";
+
+    $$("[data-caja]", host).forEach((b) => b.addEventListener("click", () => { App.caja.sensor = b.dataset.caja; App.caja.period = "today"; showView("caja"); }));
+    $$("[data-act]", host).forEach((btn) => btn.addEventListener("click", () => {
+      const b = actButton(todo[Number(btn.dataset.act)]);
+      if (!b) return;
+      if (b[1] === "run") setRunning(true).then(renderDashboard);
+      else if (b[1] === "caja") { App.caja.sensor = b[2]; App.caja.period = "today"; showView("caja"); }
+      else { if (b[2] === "calibracion") App.cal.step = 1; showView(b[2]); }
+    }));
     $("#askToday").addEventListener("click", async () => {
       const b = L.dayBounds(L.dayKey(Date.now()));
       const [rs, es] = await Promise.all([App.store.readingsRange(b.from, b.to), App.store.eventsRange(b.from, b.to)]);
-      $("#todayAnswer").textContent = L.changesReport(rs, es, App.sensors, App.settings, b.from, b.to).text;
-      $("#todayAnswer").classList.remove("muted-text");
+      const el = $("#todayAnswer");
+      el.hidden = false;
+      el.textContent = decTxt(L.changesReport(rs, es, App.sensors, App.settings, b.from, b.to).text);
     });
+    $("#dashNow").addEventListener("click", () => $("#nowBtn").click());
     bindGo(host);
-    if (window.MonThermalUI) window.MonThermalUI.bindModeButtons(host);
     drawPreview();
   }
 
@@ -866,35 +1011,74 @@
   function openCalibration() {
     const s = sensorById(App.cal.sensorId);
     if (!App.cal.draft || App.cal.draftFor !== s.id) { App.cal.draft = clone(s.calibration); App.cal.draftFor = s.id; App.cal.snapped = false; }
-    $$('input[name="calSensor"]').forEach((r) => (r.checked = r.value === s.id));
     $$('input[name="calField"]').forEach((r) => (r.checked = r.value === App.cal.field));
     $("#calSlant").value = App.cal.draft.slantDeg;
     $("#calSlantOut").textContent = App.cal.draft.slantDeg + "°";
     $("#calLight").checked = !!App.cal.draft.lightSegments;
     $("#calTrack").checked = !!(App.cal.draft.track && App.cal.draft.track.enabled);
     $("#calMsg").textContent = "";
-    $("#calSave").textContent = "✓ Aceptar ubicación del " + s.name;
-    renderCalFlow();
     buildCalTable();
+    setCalStep(App.cal.step || 1);
     drawCalibration(true);
   }
 
-  /** Guía de la calibración: qué sensor falta ubicar y qué hacer ahora. */
-  function renderCalFlow() {
-    const host = $("#calFlow");
-    if (!host) return;
+  // Asistente de calibración por sensor: 1 Encuadra → 2 Compara → 3 Acepta → (siguiente sensor) → listo.
+  const CAL_STEPS = ["Encuadra", "Compara", "Acepta"];
+  const CMP_KEYS = [["tempOut", "#exOut", 1], ["tempIn", "#exIn", 1], ["humidity", "#exHum", 0], ["time", "#exTime", null]];
+
+  function nextUncalibrated(exceptId) { return App.sensors.find((x) => x.enabled && x.id !== exceptId && !x.calibration.accepted); }
+
+  function renderCalProgress() {
+    const host = $("#calProgress"), step = App.cal.step;
     const list = App.sensors.filter((x) => x.enabled);
-    const cur = sensorById(App.cal.sensorId);
-    const chips = list.map((x) => {
-      const ok = !!x.calibration.accepted;
-      return '<button type="button" class="chip ' + (ok ? "ok" : "todo") + (x.id === cur.id ? " cur" : "") + '" data-calgo="' + x.id + '">' + (ok ? "✓ " : "○ ") + esc(x.name) + (ok ? " ubicado" : " pendiente") + "</button>";
-    }).join("");
-    const allOk = list.every((x) => x.calibration.accepted);
-    const now = allOk && cur.calibration.accepted
-      ? "✓ Todos los sensores están ubicados. Puedes volver a ajustar cualquiera (elígelo arriba) o ir a <b>▶ Iniciar monitoreo</b>."
-      : "<b>Ahora: " + esc(cur.name) + ".</b> Haz <b>clic en el centro de su pantalla</b> o <b>arrastra un rectángulo</b> alrededor de ella (no hace falta exacto: se ajusta sola a la pantalla y coloca los cuadros sobre los números). Para moverlo, arrástralo desde adentro; las esquinas se pueden afinar. Revisa las lecturas de la derecha y pulsa <b>✓ Aceptar ubicación</b>.";
-    host.innerHTML = '<div class="chips">' + chips + '</div><div class="now">' + now + "</div>";
-    $$("[data-calgo]", host).forEach((b) => b.addEventListener("click", () => { App.cal.sensorId = b.dataset.calgo; App.cal.draft = null; openCalibration(); }));
+    let html = "";
+    list.forEach((x, i) => {
+      if (i) html += '<li class="sep" aria-hidden="true">›</li>';
+      if (x.id === App.cal.sensorId && step !== "done") {
+        html += '<li class="cur"><span class="d">' + esc(x.id) + "</span>" + esc(x.name) + "</li>";
+        CAL_STEPS.forEach((w, k) => { html += '<li data-calstep="' + (k + 1) + '" class="' + (k + 1 < step ? "done" : k + 1 === step ? "cur" : "") + '"' + (k + 1 === step ? ' aria-current="step"' : "") + '><span class="d">' + (k + 1 < step ? "✓" : k + 1) + "</span>" + w + "</li>"; });
+      } else {
+        const ok = !!x.calibration.accepted;
+        html += '<li data-calsensor="' + esc(x.id) + '" style="cursor:pointer" class="' + (ok ? "done" : "") + '"><span class="d">' + (ok ? "✓" : esc(x.id)) + "</span>" + esc(x.name) + (ok ? " · lista" : " · pendiente") + "</li>";
+      }
+    });
+    host.innerHTML = html;
+  }
+
+  function setCalStep(step) {
+    App.cal.step = step;
+    const s = sensorById(App.cal.sensorId);
+    $("#calStep1").hidden = step !== 1;
+    $("#calStep2").hidden = step !== 2;
+    $("#calStep3").hidden = step !== 3;
+    $("#calDone").hidden = step !== "done";
+    $$("[data-step-n]").forEach((el) => (el.textContent = "Paso " + step + " de 3 · " + s.name));
+    $$("[data-sensor-letter]").forEach((el) => (el.textContent = s.id));
+    if (step === 2) {
+      CMP_KEYS.forEach(([, sel]) => { const i = $(sel); i.value = ""; delete i.dataset.touched; i.classList.remove("bad"); });
+      $("#calMismatch").hidden = true;
+      $("#exMsg").textContent = "";
+    }
+    if (step === 3) {
+      const a = App.cal.lastRect;
+      $("#calSummary").innerHTML = CMP_KEYS.map(([k, , dec]) => {
+        const d = a && a.details[k];
+        return '<div class="kv"><span>' + esc(L.FIELD_LABELS[k]) + '</span><span class="v md">' + esc(d && d.text ? showRead(d.text, dec) : "– –") + "</span></div>";
+      }).join("");
+      const next = nextUncalibrated(s.id);
+      $("#calSave").textContent = next ? "Aceptar y seguir con " + next.name : "Aceptar y terminar";
+    }
+    renderCalProgress();
+    if (step === 1 || step === 2) drawCalibration(false);
+  }
+
+  /** Texto leído por la app con el separador decimal elegido. */
+  const showRead = (text, dec) => (dec && App.ui.decimal === "," ? String(text).replace(".", ",") : String(text));
+  /** ¿Lo que la persona escribió coincide con lo que la app lee? */
+  function sameRead(k, typed, read) {
+    if (k === "time") return String(typed).trim().replace(/^0(\d:)/, "$1") === String(read || "").trim().replace(/^0(\d:)/, "$1");
+    const a = parseNum(typed), b = parseNum(read);
+    return a != null && b != null && Math.abs(a - b) < 0.05;
   }
 
   /** Encaja el cuadrilátero (px del frame) a la pantalla del HTC-2 y ubica los campos sobre sus números. */
@@ -917,7 +1101,7 @@
     if (sn.slantDeg != null) { d.slantDeg = sn.slantDeg; $("#calSlant").value = sn.slantDeg; $("#calSlantOut").textContent = sn.slantDeg + "°"; }
     drawCalibration(false);
     const r = App.cal.lastRect, txt = r ? ["tempIn", "tempOut", "humidity"].map((k) => r.details[k] ? L.FIELD_LABELS[k] + " " + (r.details[k].text || "∅") : null).filter(Boolean).join(" · ") : "";
-    calMsg("Pantalla de " + s.name + " ajustada: " + txt + ". Si coincide con lo que muestra el sensor, pulsa «✓ Aceptar ubicación».", "good");
+    calMsg("Pantalla de " + s.name + " ajustada: " + txt + ". Si se ve bien, toca «Listo, se ve bien».", "good");
     return true;
   }
 
@@ -981,11 +1165,23 @@
       ctx.fillText(L.FIELD_LABELS[k] + (f.enabled ? "" : " (off)"), x + 2, Math.max(12, y - 3));
     });
     // lectura en grande: lo que la app está leyendo ahora con esta ubicación
-    const cr = $("#calRead");
-    if (cr) cr.innerHTML = ["tempIn", "tempOut", "humidity", "time"].map((k) => {
-      const d = a.details[k], c = d ? d.confidence : 0, cls = !d ? "" : c >= 70 ? "good" : c >= 40 ? "warn" : "crit";
-      return '<div class="rv ' + cls + '"><span class="k">' + esc(L.FIELD_LABELS[k]) + '</span><span class="v">' + esc(d ? d.text || "—" : "—") + '</span><span class="c">' + (d ? "confianza " + L.num(c, 0) + " %" : "no se lee") + "</span></div>";
-    }).join("");
+    // paso 2: «La app lee» junto a «Tú ves» (lo que escribe la persona; vacío = coincide)
+    if (App.cal.step === 2) {
+      const bad = [];
+      CMP_KEYS.forEach(([k, sel, dec]) => {
+        const d = a.details[k], read = d && d.text ? d.text : "", inp = $(sel);
+        const shown = read ? showRead(read, dec) : "– –";
+        const cell = $("#calApp_" + k);
+        if (cell.textContent !== shown) cell.textContent = shown;
+        inp.placeholder = read ? showRead(read, dec) : "?";
+        const typed = inp.value.trim(), off = typed !== "" && !sameRead(k, typed, read);
+        inp.classList.toggle("bad", off);
+        if (off) bad.push(L.FIELD_LABELS[k] + ": la app lee «" + (read ? showRead(read, dec) : "nada") + "» y tú ves «" + typed + "»");
+      });
+      const mm = $("#calMismatch");
+      mm.hidden = !bad.length;
+      if (bad.length) mm.textContent = bad.join(" · ") + ". Toca «Ajustar y seguir» y la app se corrige sola.";
+    }
     if (!tbody.querySelector("[data-read]")) buildCalTable();
     L.FIELD_KEYS.forEach((k) => {
       const d = a.details[k];
@@ -1059,7 +1255,6 @@
 
   function bindCalibration() {
     const canvas = $("#calCanvas"), rc = $("#rectCanvas");
-    $$('input[name="calSensor"]').forEach((r) => r.addEventListener("change", () => { App.cal.sensorId = r.value; App.cal.draft = null; openCalibration(); }));
     $$('input[name="calField"]').forEach((r) => r.addEventListener("change", () => { App.cal.field = r.value; drawCalibration(false); }));
     $("#calSlant").addEventListener("input", (e) => { App.cal.draft.slantDeg = Number(e.target.value); $("#calSlantOut").textContent = e.target.value + "°"; drawCalibration(false); });
     $("#calLight").addEventListener("change", (e) => { App.cal.draft.lightSegments = e.target.checked; drawCalibration(false); });
@@ -1172,7 +1367,7 @@
       App.cal.draft = null;
       openCalibration();
       if (!res.found) calMsg("No se detectaron pantallas. Haz clic sobre la pantalla de cada sensor o arrastra un rectángulo alrededor (o acerca la cámara / mejora la luz).", "crit");
-      else calMsg("Se detectaron " + res.found + " pantalla(s) (en amarillo); se asignaron " + res.assigned + ". Revisa las lecturas de cada sensor, usa «Intercambiar A ↔ B» si están al revés y pulsa «✓ Aceptar ubicación» en cada uno.", "good");
+      else calMsg("Se detectaron " + res.found + " pantalla(s) (en amarillo); se asignaron " + res.assigned + ". Revisa las lecturas de cada sensor, usa «Intercambiar A ↔ B» si están al revés y sigue con «Listo, se ve bien».", "good");
     });
     $("#calSwap").addEventListener("click", async () => {
       const a = sensorById("A").calibration, b = sensorById("B").calibration;
@@ -1204,33 +1399,61 @@
       App.cal.draft = clone(s.calibration);
       App.prevThumbs[s.id] = null;
       await saveSensors();
-      const next = App.sensors.find((x) => x.enabled && x.id !== s.id && !x.calibration.accepted);
+      const next = nextUncalibrated(s.id);
       if (next) {
         App.cal.sensorId = next.id;
         App.cal.draft = null;
+        App.cal.step = 1;
         openCalibration();
-        calMsg("✓ Ubicación de " + s.name + " aceptada. Ahora ubica el " + next.name + ": haz clic en su pantalla o arrastra un rectángulo alrededor.", "good");
-      } else {
-        renderCalFlow();
-        calMsg("✓ Ubicación de " + s.name + " aceptada (" + new Date().toLocaleTimeString("es-CO") + ").", "good");
-      }
+        calMsg("✓ " + s.name + " listo. Ahora encuadra la pantalla de " + next.name + ".", "good");
+      } else setCalStep("done");
     });
-    // Calibrar con el ejemplo: lo que la persona ve en el sensor
+    // Paso 2: compara lo que lee la app con lo que ve la persona; si algo no coincide, se ajusta sola.
     $("#exFit").addEventListener("click", async () => {
-      const fr = App.cal.lastFrame, d = App.cal.draft, msg = $("#exMsg");
+      const fr = App.cal.lastFrame, d = App.cal.draft, msg = $("#exMsg"), a = App.cal.lastRect;
       if (!fr || !fr.gray) { msg.textContent = "No hay imagen de la cámara."; msg.className = "msg crit"; return; }
-      const want = { tempIn: $("#exIn").value.trim().replace(",", "."), tempOut: $("#exOut").value.trim().replace(",", "."), humidity: $("#exHum").value.trim(), time: $("#exTime").value.trim().replace(/^0(\d:)/, "$1") };
-      Object.keys(want).forEach((k) => { if (!want[k]) delete want[k]; });
-      if (!Object.keys(want).length) { msg.textContent = "Escribe al menos un valor de los que muestra el sensor."; msg.className = "msg warn"; return; }
+      const want = {}, typedAny = [];
+      CMP_KEYS.forEach(([k, sel]) => {
+        const typed = $(sel).value.trim(), read = a && a.details[k] ? a.details[k].text : "";
+        if (typed && !sameRead(k, typed, read)) typedAny.push(k);
+        const v = typed || read;
+        if (v) want[k] = k === "time" ? v.replace(/^0(\d:)/, "$1") : k === "humidity" ? String(parseNum(v) == null ? v : Math.round(parseNum(v))) : String(v).replace(",", ".");
+      });
+      if (!typedAny.length) {
+        // sin nada escrito, solo se acepta si la app lee números con forma de valor (no se inventan lecturas)
+        const unread = CMP_KEYS.filter(([k, sel]) => { if ($(sel).value.trim()) return false; const r = a && a.details[k] && a.details[k].text; return k === "time" ? !/^\d{1,2}:\d{2}$/.test(r || "") : parseNum(r) == null; }).map(([k]) => L.FIELD_LABELS[k]);
+        if (!a || unread.length) { msg.textContent = "La app no logra leer: " + (unread.join(", ") || "la pantalla") + ". Escribe lo que ves en el sensor (y la app se ajusta), o vuelve a encuadrar."; msg.className = "msg warn"; return; }
+        return setCalStep(3);
+      }
       msg.textContent = "Ajustando (unos segundos)…"; msg.className = "msg";
+      $("#exFit").disabled = true;
       await new Promise((r) => setTimeout(r, 30));
-      const res = Seg.fitToExample(fr.gray, pxQuad(d.quad, fr.gray.w, fr.gray.h), d.fields, want, { lightSegments: d.lightSegments });
-      d.fields = res.fields; d.slantDeg = res.slantDeg;
-      $("#calSlant").value = res.slantDeg; $("#calSlantOut").textContent = res.slantDeg + "°";
-      drawCalibration(false);
-      const bad = Object.keys(res.result).filter((k) => !res.result[k].ok);
-      if (!bad.length) { msg.textContent = "✓ Ahora lee exactamente lo que escribiste. Pulsa «✓ Aceptar ubicación»."; msg.className = "msg good"; }
-      else { msg.textContent = "Casi: no logra leer " + bad.map((k) => L.FIELD_LABELS[k] + " (lee «" + (res.result[k].text || "nada") + "»)").join(", ") + ". Prueba encuadrar solo la pantalla del sensor, acercar la cámara o mejorar la luz."; msg.className = "msg warn"; }
+      try {
+        const res = Seg.fitToExample(fr.gray, pxQuad(d.quad, fr.gray.w, fr.gray.h), d.fields, want, { lightSegments: d.lightSegments });
+        d.fields = res.fields; d.slantDeg = res.slantDeg;
+        $("#calSlant").value = res.slantDeg; $("#calSlantOut").textContent = res.slantDeg + "°";
+        drawCalibration(false);
+        const bad = Object.keys(res.result).filter((k) => !res.result[k].ok);
+        if (!bad.length) { toast("Listo: la app ya lee lo mismo que tú."); setCalStep(3); }
+        else { msg.textContent = "Casi: todavía no lee bien " + bad.map((k) => L.FIELD_LABELS[k] + " (lee «" + (res.result[k].text || "nada") + "»)").join(", ") + ". Prueba volver a encuadrar solo la pantalla gris, acercar la cámara o mejorar la luz."; msg.className = "msg warn"; }
+      } finally { $("#exFit").disabled = false; }
+    });
+    $$("#calCmp input").forEach((i) => i.addEventListener("input", () => { i.dataset.touched = "1"; drawCalibration(false); }));
+    $("#calNext1").addEventListener("click", () => {
+      const fr = App.cal.lastFrame;
+      if (!fr || fr.error) return calMsg("No hay imagen de la cámara. Actívala en Ajustes → Lecturas y cámara.", "crit");
+      setCalStep(2);
+    });
+    $("#calBack2").addEventListener("click", () => setCalStep(1));
+    $("#calBack3").addEventListener("click", () => setCalStep(2));
+    $("#calStartMon").addEventListener("click", async () => { if (!App.running) await setRunning(true); showView("dashboard"); });
+    $("#calRestart").addEventListener("click", () => { const f = App.sensors.find((x) => x.enabled) || App.sensors[0]; App.cal.sensorId = f.id; App.cal.draft = null; App.cal.step = 1; openCalibration(); });
+    $("#calExit").addEventListener("click", () => showView(App.lastSettings || "sensores"));
+    $("#calProgress").addEventListener("click", (ev) => {
+      const li = ev.target.closest("li");
+      if (!li) return;
+      if (li.dataset.calstep && Number(li.dataset.calstep) < App.cal.step) setCalStep(Number(li.dataset.calstep)); // volver a un paso ya hecho
+      else if (li.dataset.calsensor) { App.cal.sensorId = li.dataset.calsensor; App.cal.draft = null; App.cal.step = 1; openCalibration(); }
     });
     $("#calShot").addEventListener("click", () => {
       const fr = App.cal.lastFrame;
@@ -1243,36 +1466,39 @@
 
   function renderSensors() {
     const host = $('section[data-view="sensores"]');
+    const inp = (s, k, step, min, max) => '<input name="' + s.id + "_" + k + '" type="text" inputmode="decimal" class="tiny" aria-label="' + esc(s.name + " " + k) + '" placeholder="–" value="' + (s[k] == null ? "" : esc(fmt(s[k], k.indexOf("hum") === 0 ? 0 : 1))) + '">';
     host.innerHTML =
-      '<div class="banner muted">El sistema <b>no propone</b> rangos óptimos para los grillos. Ingresa los límites definidos por tu protocolo de producción; un campo vacío significa «no configurado» y no genera alertas de rango.</div>' +
-      '<div class="sensor-grid">' +
-      App.sensors.map((s) =>
-        '<form class="panel" data-sensor="' + esc(s.id) + '"><header><h2>' + esc(s.name) + '</h2><div class="spacer"></div><label class="f inline"><input type="checkbox" name="enabled" ' + (s.enabled ? "checked" : "") + "> <span>Activo</span></label></header>" +
-        '<div class="panel-body"><div class="grid-form">' +
-          '<label class="f"><span>Nombre</span><input name="name" required maxlength="60" value="' + esc(s.name) + '"></label>' +
-          '<label class="f"><span>Temperatura de control (para límites y alertas)</span><select name="controlTemp"><option value="out"' + (s.controlTemp === "out" ? " selected" : "") + '>OUT · temperatura de caja (sonda)</option><option value="in"' + (s.controlTemp === "in" ? " selected" : "") + ">IN · ambiente</option></select></label>" +
-          '<label class="f"><span>Temperatura mínima (°C) — target_min</span><input name="tempMin" type="number" step="0.1" placeholder="no configurado" value="' + (s.tempMin == null ? "" : s.tempMin) + '"></label>' +
-          '<label class="f"><span>Temperatura máxima (°C) — target_max</span><input name="tempMax" type="number" step="0.1" placeholder="no configurado" value="' + (s.tempMax == null ? "" : s.tempMax) + '"></label>' +
-          '<label class="f"><span>Humedad mínima (%)</span><input name="humMin" type="number" step="1" min="0" max="100" placeholder="no configurado" value="' + (s.humMin == null ? "" : s.humMin) + '"></label>' +
-          '<label class="f"><span>Humedad máxima (%)</span><input name="humMax" type="number" step="1" min="0" max="100" placeholder="no configurado" value="' + (s.humMax == null ? "" : s.humMax) + '"></label>' +
-        '</div><p class="form-err" hidden></p><div class="row-actions"><button class="btn primary" type="submit">Guardar</button><a class="btn ghost" href="#calibracion" data-cal-go="' + esc(s.id) + '">Calibrar</a></div></div></form>',
-      ).join("") + "</div>";
-    $$("form[data-sensor]", host).forEach((f) =>
-      f.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const s = sensorById(f.dataset.sensor);
-        const fd = new FormData(f);
-        const cand = { tempMin: fd.get("tempMin"), tempMax: fd.get("tempMax"), humMin: fd.get("humMin"), humMax: fd.get("humMax") };
-        const errors = L.validateSensorLimits(cand);
-        const err = $(".form-err", f);
-        if (errors.length) { err.hidden = false; err.textContent = errors.join(" · "); return; }
-        err.hidden = true;
-        Object.assign(s, cand, { name: String(fd.get("name") || s.name).trim() || s.name, controlTemp: fd.get("controlTemp") === "out" ? "out" : "in", enabled: fd.get("enabled") === "on" });
-        await saveSensors();
-        toast(s.name + " guardado.");
-        renderSensors();
-      }),
-    );
+      '<div class="page-head"><h1>Sensores y límites</h1></div>' +
+      '<form class="panel" id="sensForm"><header><h2>Tus límites por caja</h2><div class="spacer"></div><button class="btn primary" type="submit">Guardar</button></header><div class="panel-body col">' +
+        '<p class="muted-text">La app <b>no propone</b> rangos para los grillos: escribe los de tu protocolo. Un campo vacío = sin límite (no genera alertas de rango).</p>' +
+        '<div class="table-scroll"><table class="limits"><thead><tr><th>Caja</th><th>Activa</th><th>Temperatura que manda</th><th>Temp. mín (°C)</th><th>Temp. máx (°C)</th><th>Humedad mín (%)</th><th>Humedad máx (%)</th><th>Calibración</th></tr></thead><tbody>' +
+        App.sensors.map((s) =>
+          "<tr><td><input name=\"" + s.id + '_name" required maxlength="60" value="' + esc(s.name) + '" aria-label="Nombre de la caja ' + s.id + '"></td>' +
+          '<td><input type="checkbox" name="' + s.id + '_enabled"' + (s.enabled ? " checked" : "") + ' aria-label="' + esc(s.name) + ' activa"></td>' +
+          '<td><select name="' + s.id + '_controlTemp" aria-label="Temperatura que manda en ' + esc(s.name) + '"><option value="out"' + (s.controlTemp === "out" ? " selected" : "") + '>OUT · caja</option><option value="in"' + (s.controlTemp === "in" ? " selected" : "") + ">IN · cuarto</option></select></td>" +
+          "<td>" + inp(s, "tempMin") + "</td><td>" + inp(s, "tempMax") + "</td><td>" + inp(s, "humMin") + "</td><td>" + inp(s, "humMax") + "</td>" +
+          '<td class="cal">' + (s.calibration.accepted ? '<span class="chip soft good">' + ico("ok", 14) + "Lista</span> " : '<span class="chip soft warn">' + ico("warn", 14) + "Falta</span> ") + '<a class="btn ghost small" href="#calibracion" data-cal-go="' + esc(s.id) + '">Calibrar</a></td></tr>',
+        ).join("") +
+        '</tbody></table></div><p class="form-err" hidden></p>' +
+      "</div></form>";
+    $("#sensForm").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target), errs = [], next = [];
+      App.sensors.forEach((s) => {
+        const g = (k) => { const v = String(fd.get(s.id + "_" + k) || "").trim(); return v === "" ? "" : String(parseNum(v) == null ? v : parseNum(v)); };
+        const cand = { tempMin: g("tempMin"), tempMax: g("tempMax"), humMin: g("humMin"), humMax: g("humMax") };
+        const e = L.validateSensorLimits(cand);
+        if (e.length) errs.push(s.name + ": " + e.join(" · "));
+        next.push([s, cand, String(fd.get(s.id + "_name") || s.name).trim() || s.name, fd.get(s.id + "_controlTemp") === "out" ? "out" : "in", fd.get(s.id + "_enabled") === "on"]);
+      });
+      const err = $(".form-err", ev.target);
+      if (errs.length) { err.hidden = false; err.textContent = errs.join(" — "); return; }
+      err.hidden = true;
+      next.forEach(([s, cand, name, ct, en]) => Object.assign(s, cand, { name, controlTemp: ct, enabled: en }));
+      await saveSensors();
+      toast("Límites guardados.");
+      renderSensors();
+    });
     $$("[data-cal-go]", host).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); App.cal.sensorId = a.dataset.calGo; App.cal.draft = null; showView("calibracion"); }));
   }
 
@@ -1402,39 +1628,323 @@
     MonCharts.render($("#chartHum"), { series: humSeries, unit: "%", decimals: 0, from: b.from, to: b.to, limits: limits("h"), ariaLabel: "Humedad relativa por sensor en el periodo" });
   }
 
-  // ─────────────────────────── ALERTAS ───────────────────────────
+  // ─────────────────────────── ALERTAS (por episodio) ───────────────────────────
 
-  const alertFilter = { sev: "alerts", pending: true, sensor: "" };
+  App.alertTab = "all";
+  const EP_TITLE = {
+    tempHigh: (ep) => "Temperatura sobre tu máximo" + (ep.limit != null ? " (" + fmt(ep.limit) + " °C)" : ""),
+    tempLow: (ep) => "Temperatura bajo tu mínimo" + (ep.limit != null ? " (" + fmt(ep.limit) + " °C)" : ""),
+    humHigh: (ep) => "Humedad sobre tu máximo" + (ep.limit != null ? " (" + fmt(ep.limit, 0) + " %)" : ""),
+    humLow: (ep) => "Humedad bajo tu mínimo" + (ep.limit != null ? " (" + fmt(ep.limit, 0) + " %)" : ""),
+    tempChange: () => "Cambio brusco de temperatura",
+    humChange: () => "Cambio brusco de humedad",
+    noData: () => "No llegaron lecturas",
+    camera: () => "La cámara no vio el sensor",
+    reading: () => "La app no pudo leer bien los números",
+    stale: () => "La lectura no cambia",
+  };
+
+  function episodeCard(ep) {
+    const s = sensorById(ep.sensorId), act = ep.status === "Activa", w = ep.severity !== "CRITICAL" ? " w" : "";
+    const metric = /^(temp|hum)/.test(ep.family), hum = /^hum/.test(ep.family);
+    const st = ep.status.toLowerCase();
+    const third = ep.peak
+      ? '<span class="k">' + (ep.peak.kind === "max" ? "Llegó a" : "Bajó a") + '</span><span class="v">' + fmt(ep.peak.v, hum ? 0 : 1) + (hum ? " %" : " °C") + "</span>"
+      : '<span class="k">Avisos</span><span class="v">' + ep.count + "</span>";
+    const fix = ep.family === "reading" ? ["calibracion", "Revisar calibración"] : ep.family === "noData" || ep.family === "stale" || ep.family === "camera" ? ["camara", "Revisar la cámara"] : null;
+    return '<article class="ep' + (act ? " activa" + w : "") + '">' +
+      '<div class="ep-top"><div class="ep-tags"><span class="ep-st ' + st + (act ? w : "") + '">' + (act ? ico(ep.severity === "CRITICAL" ? "crit" : "warn", 14) + " " : "") + esc(ep.status) + '</span><span class="chip line">' + esc(ep.kind) + '</span><span class="chip line">' + esc(s ? s.name : ep.sensorId) + "</span>" + (ep.source === "simulation" ? '<span class="tag">simulación</span>' : "") + "</div>" +
+      '<span class="muted-text">' + esc(fmtHour(ep.start)) + "</span></div>" +
+      '<div class="ep-title">' + esc((EP_TITLE[ep.family] || (() => ep.text))(ep)) + "</div>" +
+      (ep.text ? '<p class="muted-text">' + esc(decTxt(ep.text)) + "</p>" : "") +
+      '<div class="ep-stats"><div><span class="k">Desde</span><span class="v">' + esc(fmtHour(ep.start)) + '</span></div><div><span class="k">Duración</span><span class="v">' + esc(ep.count === 1 && ep.end - ep.start < 60000 ? "un momento" : fmtDur(ep.end - ep.start)) + (act ? " y sigue" : "") + "</span></div><div>" + third + "</div></div>" +
+      '<div class="ep-actions">' +
+        (ep.status !== "Reconocida" ? '<button class="btn" type="button" data-ack-ep="' + esc(ep.id) + '">' + ico("ok", 16) + "Reconocer</button>" : '<span class="muted-text" style="align-self:center">Ya la viste</span>') +
+        (metric ? '<button class="btn" type="button" data-ep-chart="' + esc(ep.id) + '">Ver gráfica</button>' : fix ? '<a class="btn" href="#' + fix[0] + '" data-go="' + fix[0] + '">' + fix[1] + "</a>" : "") +
+      "</div></article>";
+  }
 
   async function renderAlerts() {
     const host = $('section[data-view="alertas"]');
     const now = Date.now(), S = App.settings;
-    const live = App.sensors.filter((s) => s.enabled).map((s) => ({ s, st: L.currentStatus(s, App.latest[s.id], now, S) })).filter((x) => x.st.code === "SIN_DATOS");
-    let evs = (await App.store.eventsRange(now - 30 * DAY, now)).sort((a, b) => b.ts - a.ts);
-    if (alertFilter.sev === "alerts") evs = evs.filter((e) => e.severity !== "INFO");
-    if (alertFilter.sev === "CRITICAL") evs = evs.filter((e) => e.severity === "CRITICAL");
-    if (alertFilter.pending) evs = evs.filter((e) => !e.ack);
-    if (alertFilter.sensor) evs = evs.filter((e) => e.sensorId === alertFilter.sensor);
-    host.innerHTML =
-      (live.length ? '<div class="panel"><header><h2>Ahora</h2></header><div class="panel-body"><ul class="events">' + live.map((x) => '<li class="ev warn">' + sevChip("WARNING") + "<div><b>Sin lecturas</b> · " + esc(x.s.name) + "<p>" + esc(x.st.note) + ". Lecturas no actualizadas: verificar que el monitoreo está en curso y la cámara conectada.</p></div></li>").join("") + "</ul></div></div>" : "") +
-      '<div class="panel"><header><h2>Alertas y eventos (30 días)</h2><div class="spacer"></div><button class="btn" id="ackAll" type="button">Reconocer todas</button></header>' +
-      '<div class="panel-body"><form class="filters" id="alertForm">' +
-        '<label class="f"><span>Severidad</span><select name="sev"><option value="alerts"' + (alertFilter.sev === "alerts" ? " selected" : "") + '>WARNING y CRITICAL</option><option value="CRITICAL"' + (alertFilter.sev === "CRITICAL" ? " selected" : "") + '>Solo CRITICAL</option><option value="all"' + (alertFilter.sev === "all" ? " selected" : "") + ">Todos (incluye INFO)</option></select></label>" +
-        '<label class="f"><span>Sensor</span><select name="sensor"><option value="">Todos</option>' + App.sensors.map((s) => '<option value="' + s.id + '"' + (alertFilter.sensor === s.id ? " selected" : "") + ">" + esc(s.name) + "</option>").join("") + "</select></label>" +
-        '<label class="f inline"><input type="checkbox" name="pending"' + (alertFilter.pending ? " checked" : "") + "> <span>Solo sin reconocer</span></label>" +
-      "</form>" +
-      (evs.length
-        ? '<ul class="events">' + evs.slice(0, 300).map((e) => eventItem(e).replace("</div></li>", (e.severity !== "INFO" && !e.ack ? '<button class="btn small" data-ack="' + esc(e.id) + '">Reconocer</button>' : e.ack ? '<span class="small-text muted-text">reconocida ' + esc(L.fmtDateTime(e.ack)) + "</span>" : "") + "</div></li>")).join("") + "</ul>"
-        : '<p class="muted-text">Sin eventos con estos filtros.</p>') +
-      '<p class="hint">Umbrales actuales: cambio de ±' + S.tempChangeThreshold + " °C o ±" + S.humidityChangeThreshold + " %HR en " + S.changeWindowMin + " min · " + S.confirmReadings + " lecturas confiables para confirmar un valor fuera de rango · sin datos tras " + S.noDataCycles + " ciclos · confianza mínima " + S.minConfidence + ' %. <a href="#configuracion" data-go="configuracion">Cambiar</a>.</p>' +
-      "</div></div>";
-    $("#alertForm").addEventListener("change", (e) => {
-      const fd = new FormData(e.currentTarget);
-      alertFilter.sev = fd.get("sev"); alertFilter.sensor = fd.get("sensor"); alertFilter.pending = fd.get("pending") === "on";
-      renderAlerts();
+    const eps = await loadEpisodes(30);
+    const nAct = eps.filter((e) => e.status === "Activa").length;
+    const shown = eps.filter((e) => (App.alertTab === "active" ? e.status === "Activa" : App.alertTab === "closed" ? e.status !== "Activa" : true)).slice(0, 200);
+    const live = App.running ? App.sensors.filter((s) => s.enabled).map((s) => ({ s, st: L.currentStatus(s, App.latest[s.id], now, S) })).filter((x) => x.st.code === "SIN_DATOS") : [];
+    let list = "", day = "";
+    shown.forEach((ep) => {
+      const d = fmtDay(ep.start);
+      if (d !== day) { day = d; list += '<h3 class="ep-day">' + esc(d) + "</h3>"; }
+      list += episodeCard(ep);
     });
-    $("#ackAll").addEventListener("click", async () => { const n = await App.store.ackAll(); toast(n + " alerta(s) reconocidas."); renderAlerts(); });
-    $$("[data-ack]", host).forEach((b) => b.addEventListener("click", async () => { await App.store.ackEvent(b.dataset.ack); renderAlerts(); }));
+    host.innerHTML =
+      '<div class="page-head"><h1>Alertas</h1><div class="row-actions">' +
+        '<div class="segbtn" role="group" aria-label="Filtro">' + [["all", "Todas"], ["active", "Activas (" + nAct + ")"], ["closed", "Cerradas"]].map((f) => '<button type="button" data-atab="' + f[0] + '" aria-pressed="' + (App.alertTab === f[0]) + '">' + f[1] + "</button>").join("") + "</div>" +
+        (eps.some((e) => e.status !== "Reconocida") ? '<button class="btn" id="ackAll" type="button">Reconocer todas</button>' : "") +
+      "</div></div>" +
+      (live.length ? '<div class="banner warn">' + ico("warn", 20) + "<span><b>Ahora mismo no llegan lecturas de " + esc(live.map((x) => x.s.name).join(" y ")) + ".</b> Revisa que la cámara esté activa y la ventana de la app abierta. La app no sabe la causa.</span></div>" : "") +
+      '<p class="muted-text">Varias alertas iguales seguidas se juntan en un solo episodio. «Activa» = sigue pasando; «Resuelta» = volvió a la normalidad; «Reconocida» = ya la viste.</p>' +
+      (shown.length ? '<div class="ep-list">' + list + "</div>"
+        : '<div class="empty">' + ico("ok", 28) + "<b>" + (App.alertTab === "active" ? "No hay alertas activas" : "No hay alertas") + '</b><span class="muted-text">En los últimos 30 días.</span></div>') +
+      '<p class="hint">Cuándo avisa la app: cambio de ±' + esc(fmt(S.tempChangeThreshold)) + " °C o ±" + esc(fmt(S.humidityChangeThreshold, 1)) + " % en " + S.changeWindowMin + " min · " + S.confirmReadings + " lecturas seguidas para confirmar un valor fuera de tus límites · sin datos tras " + S.noDataCycles + ' lecturas perdidas. <a href="#configuracion" data-go="configuracion">Cambiar</a>.</p>';
+    const byId = {};
+    eps.forEach((e) => (byId[e.id] = e));
+    $$("[data-atab]", host).forEach((b) => b.addEventListener("click", () => { App.alertTab = b.dataset.atab; renderAlerts(); }));
+    const ackAll = $("#ackAll");
+    if (ackAll) ackAll.addEventListener("click", async () => { const n = await App.store.ackAll(); toast(n ? "Listo: todas las alertas quedaron reconocidas." : "No había alertas por reconocer."); renderAlerts(); });
+    $$("[data-ack-ep]", host).forEach((b) => b.addEventListener("click", async () => {
+      const ep = byId[b.dataset.ackEp];
+      for (const id of ep.eventIds) await App.store.ackEvent(id);
+      renderAlerts();
+    }));
+    $$("[data-ep-chart]", host).forEach((b) => b.addEventListener("click", () => {
+      const ep = byId[b.dataset.epChart];
+      App.caja.sensor = ep.sensorId;
+      App.caja.period = L.dayKey(ep.start) === L.dayKey(Date.now()) ? "today" : Date.now() - ep.start < DAY ? "24h" : "7d";
+      showView("caja");
+    }));
+    bindGo(host);
+  }
+
+  // ─────────────────────────── CAJA (detalle y gráfica) ───────────────────────────
+
+  App.caja = { sensor: "A", period: "today", compare: false };
+
+  function cajaBounds() {
+    const now = Date.now(), P = App.caja.period;
+    if (P === "7d") return { from: now - 7 * DAY, to: now };
+    if (P === "24h") return { from: now - DAY, to: now };
+    return { from: L.dayBounds(L.dayKey(now)).from, to: now };
+  }
+
+  function niceStep(raw) {
+    const p = Math.pow(10, Math.floor(Math.log10(raw || 1))), m = raw / p;
+    return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+  }
+
+  /**
+   * Gráfica SVG de una variable: zona de tus límites, tramos fuera de límites en rojo grueso,
+   * huecos sin datos rayados, máximo y mínimo marcados y la línea de «ahora».
+   * o: { pts:[{t,v}], cmp:[{t,v}]|null, from, to, mn, mx, unit, dec, gapMs, label, minSpan }
+   */
+  function boxChartSvg(o) {
+    if (!o.pts.length) return '<div class="empty">' + ico("off", 28) + "<b>Sin lecturas en este periodo</b><span class=\"muted-text\">Cuando la app lea el sensor, aquí aparece la gráfica.</span></div>";
+    const W = 900, H = o.h || 300, pl = 56, pr = 18, pt = 22, pb = 36;
+    const vals = o.pts.map((p) => p.v).concat(o.cmp ? o.cmp.map((p) => p.v) : []);
+    if (o.mn != null) vals.push(o.mn);
+    if (o.mx != null) vals.push(o.mx);
+    let lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    const minSpan = o.minSpan || 2;
+    if (hi - lo < minSpan) { const c = (hi + lo) / 2; lo = c - minSpan / 2; hi = c + minSpan / 2; }
+    const padv = (hi - lo) * 0.1; lo -= padv; hi += padv;
+    const X = (t) => pl + ((t - o.from) / (o.to - o.from)) * (W - pl - pr);
+    const Y = (v) => pt + (1 - (v - lo) / (hi - lo)) * (H - pt - pb);
+    const f1 = (n) => n.toFixed(1);
+    let s = '<defs><pattern id="hatch' + o.id + '" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" style="stroke:var(--muted);stroke-width:2;opacity:.45"/></pattern></defs>';
+    // rejilla horizontal
+    const step = niceStep((hi - lo) / 4);
+    for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) {
+      s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + f1(Y(v)) + '" y2="' + f1(Y(v)) + '" style="stroke:var(--line);stroke-width:1"/>' +
+        '<text x="' + (pl - 8) + '" y="' + f1(Y(v) + 5) + '" text-anchor="end" style="fill:var(--muted);font-size:14px">' + esc(fmt(v, step < 1 ? 1 : 0)) + "</text>";
+    }
+    // zona de tus límites
+    if (o.mn != null && o.mx != null) s += '<rect x="' + pl + '" y="' + f1(Y(o.mx)) + '" width="' + (W - pl - pr) + '" height="' + f1(Y(o.mn) - Y(o.mx)) + '" style="fill:var(--ok-bg);stroke:var(--ok);stroke-dasharray:6 5;opacity:.9"/>';
+    [o.mn, o.mx].forEach((v) => { if (v != null && (o.mn == null || o.mx == null)) s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + f1(Y(v)) + '" y2="' + f1(Y(v)) + '" style="stroke:var(--ok);stroke-width:2;stroke-dasharray:6 5"/>'; });
+    // marcas de tiempo
+    const span = o.to - o.from, ticks = [];
+    if (span > 2 * DAY) {
+      const d = new Date(o.from); d.setHours(0, 0, 0, 0);
+      for (let t = d.getTime() + DAY; t < o.to; t += DAY) ticks.push([t, new Date(t).toLocaleDateString("es-CO", { weekday: "short", day: "numeric" })]);
+    } else {
+      const d = new Date(o.from); d.setMinutes(0, 0, 0);
+      const every = span > 12 * HOUR ? 3 : span > 6 * HOUR ? 2 : 1;
+      for (let t = d.getTime() + HOUR; t < o.to; t += HOUR) if (new Date(t).getHours() % every === 0) ticks.push([t, new Date(t).toLocaleTimeString("es-CO", { hour: "numeric" })]);
+    }
+    ticks.forEach(([t, lab]) => {
+      s += '<line x1="' + f1(X(t)) + '" x2="' + f1(X(t)) + '" y1="' + pt + '" y2="' + (H - pb) + '" style="stroke:var(--line);stroke-width:1;opacity:.6"/>' +
+        '<text x="' + f1(X(t)) + '" y="' + (H - pb + 22) + '" text-anchor="middle" style="fill:var(--muted);font-size:14px">' + esc(lab) + "</text>";
+    });
+    // huecos sin datos (rayados)
+    const gaps = [];
+    if (o.pts[0].t - o.from > o.gapMs) gaps.push([o.from, o.pts[0].t]);
+    for (let i = 1; i < o.pts.length; i++) if (o.pts[i].t - o.pts[i - 1].t > o.gapMs) gaps.push([o.pts[i - 1].t, o.pts[i].t]);
+    if (o.to - o.pts[o.pts.length - 1].t > o.gapMs) gaps.push([o.pts[o.pts.length - 1].t, o.to]);
+    gaps.forEach(([a, b]) => { s += '<rect x="' + f1(X(a)) + '" y="' + pt + '" width="' + f1(Math.max(1, X(b) - X(a))) + '" height="' + (H - pt - pb) + '" fill="url(#hatch' + o.id + ')"/>'; });
+    const path = (pts) => {
+      let d = "";
+      pts.forEach((p, i) => { d += (i && p.t - pts[i - 1].t <= o.gapMs ? "L" : "M") + f1(X(p.t)) + " " + f1(Y(p.v)); });
+      return d;
+    };
+    if (o.cmp && o.cmp.length) s += '<path d="' + path(o.cmp) + '" style="fill:none;stroke:var(--info);stroke-width:2.5;stroke-dasharray:7 6"/>';
+    s += '<path d="' + path(o.pts) + '" style="fill:none;stroke:var(--strong);stroke-width:2.5;stroke-linejoin:round"/>';
+    // tramos fuera de tus límites
+    let od = "";
+    for (let i = 1; i < o.pts.length; i++) {
+      const a = o.pts[i - 1], b = o.pts[i];
+      if (b.t - a.t > o.gapMs) continue;
+      if (outOf(a.v, o.mn, o.mx) || outOf(b.v, o.mn, o.mx)) od += "M" + f1(X(a.t)) + " " + f1(Y(a.v)) + "L" + f1(X(b.t)) + " " + f1(Y(b.v));
+    }
+    if (od) s += '<path d="' + od + '" style="fill:none;stroke:var(--crit);stroke-width:6;stroke-linecap:round"/>';
+    // máximo y mínimo
+    let pMax = o.pts[0], pMin = o.pts[0];
+    o.pts.forEach((p) => { if (p.v > pMax.v) pMax = p; if (p.v < pMin.v) pMin = p; });
+    const mark = (p, word, up) => {
+      const x = X(p.t), y = Y(p.v), anchor = x > W - 120 ? "end" : x < pl + 60 ? "start" : "middle";
+      return '<circle cx="' + f1(x) + '" cy="' + f1(y) + '" r="5" style="fill:var(--surface);stroke:var(--strong);stroke-width:2.5"/>' +
+        '<text x="' + f1(x) + '" y="' + f1(up ? y - 11 : y + 21) + '" text-anchor="' + anchor + '" style="fill:var(--strong);font-size:14px;font-weight:700">' + esc(word + " " + fmt(p.v, o.dec)) + "</text>";
+    };
+    if (pMax.v !== pMin.v) s += mark(pMax, "máx", true) + mark(pMin, "mín", false);
+    // ahora
+    const now = Date.now();
+    if (now >= o.from && now <= o.to + 1000) {
+      const x = X(Math.min(now, o.to));
+      s += '<line x1="' + f1(x) + '" x2="' + f1(x) + '" y1="' + (pt - 6) + '" y2="' + (H - pb) + '" style="stroke:var(--brand);stroke-width:2;stroke-dasharray:3 4"/>' +
+        '<text x="' + f1(x - 4) + '" y="' + (pt - 8) + '" text-anchor="end" style="fill:var(--brand);font-size:13px;font-weight:700">ahora</text>';
+    }
+    return '<svg class="boxchart" viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' + esc(o.label) + '">' + s + "</svg>";
+  }
+
+  async function renderCaja() {
+    const host = $('section[data-view="caja"]');
+    const C = App.caja, S = App.settings, now = Date.now();
+    let s = sensorById(C.sensor);
+    if (!s) { s = App.sensors[0]; C.sensor = s.id; }
+    const other = App.sensors.find((x) => x.id !== s.id && x.enabled);
+    const b = cajaBounds();
+    const all = await App.store.readingsRange(b.from - HOUR, b.to);
+    all.sort((x, y) => x.ts - y.ts);
+    const mine = all.filter((r) => r.sensorId === s.id && r.ts >= b.from);
+    const ck = L.controlKey(s), ok = ck === "tempOut" ? "OUT" : "IN";
+    const dT = L.describe(mine.map((r) => r[ck])), dH = L.describe(mine.map((r) => r.humidity));
+    const at = (v) => { const r = mine.find((x) => x[ck] === v); return r ? (C.period === "7d" ? fmtWhen(r.ts) : "a las " + fmtHour(r.ts)) : ""; };
+    const o = L.minutesOutOfRange(mine, s, now, S), outT = o.tempHigh + o.tempLow, outH = o.humHigh + o.humLow;
+    const hasLim = s.tempMin != null || s.tempMax != null || s.humMin != null || s.humMax != null;
+    const bx = thermalBoxFor(s.id);
+    const last = App.latest[s.id] || (await App.store.lastReading(s.id));
+    const st = L.currentStatus(s, last, now, S);
+    const t = shownValue(last, ck), h = shownValue(last, "humidity");
+    const maxPts = 700, bucket = (b.to - b.from) / maxPts;
+    const gapMs = Math.max(3 * S.intervalSec * 1000, 2.5 * bucket, 5 * 60000);
+    const pts = L.series(mine, s.id, ck, b.from, b.to, maxPts).map((p) => ({ t: p.t, v: p.v }));
+    const cmp = C.compare && other ? L.series(all, other.id, L.controlKey(other), b.from, b.to, maxPts).map((p) => ({ t: p.t, v: p.v })) : null;
+    const hum = L.series(mine, s.id, "humidity", b.from, b.to, maxPts).map((p) => ({ t: p.t, v: p.v }));
+    const periodTxt = { today: "hoy", "24h": "en las últimas 24 h", "7d": "en los últimos 7 días" }[C.period];
+    const lim = (mn, mx, dec, unit) => (mn == null && mx == null ? "no configurado" : (mn != null ? fmt(mn, dec) : "–") + " a " + (mx != null ? fmt(mx, dec) : "–") + " " + unit);
+
+    host.innerHTML =
+      '<div class="page-head"><h1>' + esc(s.name) + "</h1>" +
+        '<div class="row-actions">' +
+          '<div class="segbtn" role="group" aria-label="Caja">' + App.sensors.map((x) => '<button type="button" data-csensor="' + x.id + '" aria-pressed="' + (x.id === s.id) + '">' + esc(x.name) + "</button>").join("") + "</div>" +
+          '<div class="segbtn" role="group" aria-label="Periodo">' + [["today", "Hoy"], ["24h", "24 h"], ["7d", "7 días"]].map((p) => '<button type="button" data-cperiod="' + p[0] + '" aria-pressed="' + (C.period === p[0]) + '">' + p[1] + "</button>").join("") + "</div>" +
+        "</div></div>" +
+      '<div class="kpis">' +
+        '<div class="kpi' + (outT ? " crit" : "") + '"><span>Fuera de límites</span><span class="v">' + (hasLim ? esc(fmtDur(outT * 60000)) : "–") + '</span><span class="s">' + (hasLim ? "temperatura " + periodTxt + (outH ? " · humedad " + esc(fmtDur(outH * 60000)) : "") : "sin límites configurados") + "</span></div>" +
+        '<div class="kpi"><span>Máxima</span><span class="v">' + (dT.n ? fmt(dT.max) + " °C" : "–") + '</span><span class="s">' + esc(dT.n ? at(dT.max) : "sin datos") + "</span></div>" +
+        '<div class="kpi"><span>Mínima</span><span class="v">' + (dT.n ? fmt(dT.min) + " °C" : "–") + '</span><span class="s">' + esc(dT.n ? at(dT.min) : "sin datos") + "</span></div>" +
+        '<div class="kpi"><span>Promedio</span><span class="v">' + (dT.n ? fmt(dT.mean) + " °C" : "–") + '</span><span class="s">' + (dH.n ? "humedad " + fmt(dH.mean, 0) + " %" : "sin datos de humedad") + "</span></div>" +
+        '<div class="kpi"><span>Lámpara encendida</span><span class="v">' + (bx && C.period === "today" ? esc(fmtDur((bx.onMinutesToday || 0) * 60000)) : "–") + '</span><span class="s">' + (bx ? (C.period === "today" ? "hoy" : "solo se cuenta el día de hoy") : "sin control de lámparas") + "</span></div>" +
+      "</div>" +
+      '<div class="caja-grid"><div class="caja-main col">' +
+        '<div class="panel"><header><h2>Temperatura de la caja (' + ok + ")</h2><div class=\"spacer\"></div>" +
+          (other ? '<label class="f inline"><input type="checkbox" id="cajaCmp"' + (C.compare ? " checked" : "") + "> <span>Comparar con " + esc(other.name) + "</span></label>" : "") + "</header>" +
+          '<div class="panel-body col">' +
+            '<div class="legend"><span><i class="lg-line"></i>' + esc(s.name) + "</span>" + (cmp ? '<span><i class="lg-dash"></i>' + esc(other.name) + "</span>" : "") + (s.tempMin != null && s.tempMax != null ? '<span><i class="lg-zone"></i>Tus límites</span><span><i class="lg-out"></i>Fuera de límites</span>' : "") + '<span><i class="lg-gap"></i>Sin datos</span></div>' +
+            boxChartSvg({ id: "t", pts, cmp, from: b.from, to: b.to, mn: s.tempMin, mx: s.tempMax, unit: "°C", dec: 1, gapMs, minSpan: 2, label: "Temperatura de " + s.name + " " + periodTxt }) +
+          "</div></div>" +
+        '<div class="panel"><header><h2>Humedad</h2></header><div class="panel-body">' +
+          boxChartSvg({ id: "h", pts: hum, cmp: null, from: b.from, to: b.to, mn: s.humMin, mx: s.humMax, unit: "%", dec: 0, gapMs, minSpan: 10, h: 220, label: "Humedad de " + s.name + " " + periodTxt }) +
+        "</div></div>" +
+        '<p class="muted-text">Solo se grafican lecturas confiables. Para otros periodos y la tabla completa: <a href="#graficas" data-go="graficas">gráficas por periodo</a> · <a href="#historico" data-go="historico">historial</a>.</p>' +
+      "</div>" +
+      '<aside class="caja-side">' +
+        '<div class="panel"><header><h2>Ahora</h2><div class="spacer"></div>' + statusChip(st.code) + '</header><div class="panel-body quad">' +
+          '<div class="kv"><span>Temperatura (' + ok + ")</span>" + (t.v != null ? '<span class="v' + (outOf(t.v, s.tempMin, s.tempMax) ? " crit" : "") + '">' + fmt(t.v) + " °C</span>" : '<span class="v">– –</span>') + "</div>" +
+          '<div class="kv"><span>Humedad</span>' + (h.v != null ? '<span class="v' + (outOf(h.v, s.humMin, s.humMax) ? " crit" : "") + '">' + fmt(h.v, 0) + " %</span>" : '<span class="v">– –</span>') + "</div>" +
+          '<span class="muted-text" style="grid-column:1/-1">' + (last ? "Última lectura " + esc(fmtAgo(last.ts)) : "Aún no hay lecturas") + "</span>" +
+        "</div></div>" +
+        '<div class="panel"><header><h2>Tus límites</h2></header><div class="panel-body col">' +
+          '<div class="kv"><span>Temperatura</span><span class="v sm">' + esc(lim(s.tempMin, s.tempMax, 1, "°C")) + "</span></div>" +
+          '<div class="kv"><span>Humedad</span><span class="v sm">' + esc(lim(s.humMin, s.humMax, 0, "%")) + "</span></div>" +
+          '<p class="muted-text">Los pones tú según tu protocolo; la app no propone rangos.</p>' +
+          '<a class="btn" href="#sensores" data-go="sensores">Cambiar límites</a>' +
+        "</div></div>" +
+        '<div class="panel"><header><h2>Lámpara</h2></header><div class="panel-body col">' +
+          (bx
+            ? lampLine(bx) + '<div class="segbtn full" role="group" aria-label="Modo de la lámpara">' + [["AUTO", "Automático"], ["MANUAL_ON", "Encender"], ["MANUAL_OFF", "Apagar"]].map((m) => '<button type="button" data-box="' + esc(bx.id) + '" data-mode="' + m[0] + '" aria-pressed="' + (bx.mode === m[0]) + '">' + m[1] + "</button>").join("") + "</div>" +
+              '<p class="muted-text">En «Automático» la lámpara se enciende y apaga sola según tu perfil. En manual no se apaga por temperatura (sí por seguridad).</p>'
+            : '<p class="muted-text">Esta caja no tiene control de lámpara conectado.</p><a class="btn" href="#termico" data-go="termico">Configurar lámparas</a>') +
+        "</div></div>" +
+        '<button class="btn" type="button" id="cajaXlsx">Descargar Excel de este periodo</button>' +
+      "</aside></div>";
+
+    $$("[data-csensor]", host).forEach((x) => x.addEventListener("click", () => { C.sensor = x.dataset.csensor; renderCaja(); }));
+    $$("[data-cperiod]", host).forEach((x) => x.addEventListener("click", () => { C.period = x.dataset.cperiod; renderCaja(); }));
+    const cc = $("#cajaCmp");
+    if (cc) cc.addEventListener("change", () => { C.compare = cc.checked; renderCaja(); });
+    $("#cajaXlsx").addEventListener("click", () => exportExcel(b.from, b.to));
+    if (window.MonThermalUI) window.MonThermalUI.bindModeButtons(host);
+    bindGo(host);
+  }
+
+  // ─────────────────────────── DATOS Y CONEXIONES ───────────────────────────
+
+  async function renderDatos() {
+    const host = $('section[data-view="datos"]');
+    const [nRead, nSnap] = await Promise.all([App.store.countReadings(), App.store.countSnapshots()]);
+    const th = window.MonThermalUI;
+    const thOn = !!thermalStatus();
+    host.innerHTML =
+      '<div class="page-head"><h1>Datos y conexiones</h1></div>' +
+      '<div class="panel"><header><h2>Llevar tus datos a otros sistemas</h2></header><div class="panel-body">' +
+        '<div class="conn-row"><div><b>Excel</b><span class="muted-text">Lecturas, alertas y resumen por día, listo para abrir en Excel.</span></div>' +
+          '<select id="dXlsxDays" aria-label="Periodo del Excel"><option value="1">Hoy</option><option value="7">7 días</option><option value="30" selected>30 días</option></select>' +
+          '<button class="btn primary" type="button" id="dXlsx">Descargar Excel</button></div>' +
+        '<div class="conn-row"><div><b>Resumen para el panel de seguimiento</b><span class="muted-text">Últimas 24 h: valores, promedios por hora y alertas (sin imágenes). Súbelo en el panel → <b>Monitoreo</b>. Nada se envía solo: tú decides cuándo.</span></div>' +
+          '<button class="btn" type="button" id="dSumCopy">Copiar</button><button class="btn primary" type="button" id="dSumDl">Descargar</button></div>' +
+        '<div class="conn-row"><div><b>Copia de respaldo</b><span class="muted-text">' + nRead + " lecturas · " + nSnap + " imágenes guardadas en este navegador. Úsala para pasar los datos a otro computador.</span></div>" +
+          '<button class="btn" type="button" id="dBkExport">Crear copia</button><label class="btn">Restaurar<input type="file" id="dBkImport" accept="application/json,.json" hidden></label></div>' +
+        '<div class="conn-row"><div><b>Control de lámparas</b><span class="muted-text">' + (thOn ? "Conectado en este computador." : th && th.online === false ? "No conectado: el servicio local de las lámparas no responde." : "Comprobando…") + "</span></div>" +
+          '<span class="chip ' + (thOn ? "ok" : "off") + '">' + ico(thOn ? "ok" : "off", 16) + (thOn ? "Conectado" : "Sin conexión") + '</span><a class="btn ghost" href="#termico" data-go="termico">Abrir lámparas</a></div>' +
+      "</div></div>" +
+      '<div class="panel"><header><h2>Formato de los números</h2></header><div class="panel-body">' +
+        '<div class="conn-row"><div><b>Separador decimal</b><span class="muted-text">Cómo se muestran los decimales en la app (p. ej. 28,3 °C o 28.3 °C).</span></div>' +
+          '<div class="segbtn" role="group" aria-label="Separador decimal">' + [[",", "Coma (28,3)"], [".", "Punto (28.3)"]].map((d) => '<button type="button" data-dec="' + d[0] + '" aria-pressed="' + (App.ui.decimal === d[0]) + '">' + d[1] + "</button>").join("") + "</div></div>" +
+      "</div></div>";
+
+    $("#dXlsx").addEventListener("click", () => { const d = Number($("#dXlsxDays").value); const now = Date.now(); exportExcel(d === 1 ? L.dayBounds(L.dayKey(now)).from : now - d * DAY, now); });
+    const summary = async () => {
+      const now = Date.now();
+      const [rs, es] = await Promise.all([App.store.readingsRange(now - 2 * DAY, now), App.store.eventsRange(now - 7 * DAY, now)]);
+      return L.buildSummary(rs, es, App.sensors, App.settings, now);
+    };
+    $("#dSumDl").addEventListener("click", async () => {
+      download(new Blob([JSON.stringify(await summary(), null, 1)], { type: "application/json" }), "bioteva-resumen_" + stamp() + ".json");
+      toast("Resumen descargado: súbelo en el panel → Monitoreo.");
+    });
+    $("#dSumCopy").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(JSON.stringify(await summary())); toast("Resumen copiado. Pégalo en el panel → Monitoreo."); }
+      catch (e) { toast("No se pudo copiar; usa «Descargar».", "warn"); }
+    });
+    $("#dBkExport").addEventListener("click", async () => {
+      const data = await App.store.exportBackup();
+      download(new Blob([JSON.stringify(data)], { type: "application/json" }), "bioteva-monitor-respaldo_" + stamp() + ".json");
+    });
+    $("#dBkImport").addEventListener("change", async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      try {
+        const res = await App.store.importBackup(JSON.parse(await f.text()));
+        await loadConfig();
+        toast("Copia restaurada: " + res.readings + " lecturas, " + res.events + " eventos.");
+        renderDatos();
+      } catch (err) { toast("No se pudo restaurar: " + err.message, "crit"); }
+    });
+    $$("[data-dec]", host).forEach((b) => b.addEventListener("click", async () => {
+      App.ui.decimal = b.dataset.dec;
+      await App.store.setKV("ui", App.ui);
+      toast("Listo: los decimales se muestran con " + (App.ui.decimal === "," ? "coma" : "punto") + ".");
+      renderDatos();
+    }));
     bindGo(host);
   }
 
@@ -1695,14 +2205,17 @@
       });
     }
     App.lastCycleAt = (await App.store.getKV("lastCycleAt")) || null;
+    const ui = await App.store.getKV("ui");
+    if (ui && (ui.decimal === "," || ui.decimal === ".")) App.ui.decimal = ui.decimal;
   }
 
   function bindTheme() {
-    const order = ["system", "light", "dark"], glyph = { system: "◐", light: "○", dark: "●" };
+    const order = ["system", "light", "dark"];
     const btn = $("#themeBtn");
     let cur = "system";
     try { cur = localStorage.getItem("mon-theme") || "system"; } catch (e) { /* opcional */ }
-    const set = (m) => { if (m === "system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", m); btn.textContent = glyph[m]; };
+    const label = { system: "Tema: automático", light: "Tema: claro", dark: "Tema: oscuro" };
+    const set = (m) => { if (m === "system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", m); btn.title = label[m] + " (toca para cambiar)"; btn.setAttribute("aria-label", label[m] + ". Toca para cambiar"); };
     set(cur);
     btn.addEventListener("click", () => { cur = order[(order.indexOf(cur) + 1) % 3]; try { localStorage.setItem("mon-theme", cur); } catch (e) { /* opcional */ } set(cur); });
   }
@@ -1732,15 +2245,15 @@
     await loadConfig();
     try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { /* opcional */ }
 
-    $$("#tabs .tab").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
-    window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if (v && v !== App.view && $('main > section[data-view="' + v + '"]')) showView(v); });
+    $$("#tabs .tab, #bottomNav button, #sideNav button").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
+    $$("[data-nav]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); showView(a.dataset.nav); }));
+    window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if (v && v !== App.view && (v === "ajustes" || $('main > section[data-view="' + v + '"]'))) showView(v); });
     $("#runBtn").addEventListener("click", () => setRunning(!App.running));
     $("#nowBtn").addEventListener("click", async () => {
       if (App.settings.frameSource === "camera" && App.cam.status !== "active") await startCameras();
       const res = await runCycle("manual");
       if (res && res.length) toast("Lectura registrada: " + res.map((r) => sensorById(r.reading.sensorId).name + " " + (L.STATUS_LABELS[r.reading.status] || r.reading.status)).join(" · "));
     });
-    $("#xlsxBtn").addEventListener("click", () => exportExcel(Date.now() - 30 * DAY, Date.now()));
     $("#installBtn").addEventListener("click", promptInstall);
     window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); App.installPrompt = e; $("#installBtn").hidden = false; });
     window.addEventListener("appinstalled", () => { $("#installBtn").hidden = true; toast("BioTeva Monitor quedó instalado en este computador."); });
@@ -1749,6 +2262,8 @@
     });
     let rz;
     window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (App.view === "graficas") renderCharts(); }, 250); });
+    // cada minuto se refrescan los «hace X min» de Inicio (sin tocar formularios)
+    setInterval(() => { if (App.view === "dashboard" && !document.hidden) renderDashboard(); }, 60000);
 
     bindCameraView();
     bindCalibration();
@@ -1768,7 +2283,7 @@
     $("#footMode").textContent = App.isExtension ? "· Extensión de Chrome" : window.matchMedia("(display-mode: standalone)").matches ? "· App instalada" : "";
 
     const v = location.hash.slice(1);
-    showView(v && $('main > section[data-view="' + v + '"]') ? v : "dashboard");
+    showView(v && (v === "ajustes" || $('main > section[data-view="' + v + '"]')) ? v : "dashboard");
     window.BioTevaMonitorReady = true;
     $("#bootMsg").hidden = true;
     renderHeader();

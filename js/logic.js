@@ -1105,7 +1105,86 @@
     return items;
   }
 
+  // ─────────────────────────── alertas por EPISODIO ───────────────────────────
+  //
+  // Muchas alertas iguales seguidas (p. ej. «temperatura sobre el límite» en cada
+  // lectura) son UN mismo problema. Se agrupan por sensor y tipo de problema mientras
+  // no pase más de un rato entre una y otra. Estado del episodio: «Activa» (sigue
+  // pasando), «Resuelta» (volvió a la zona o dejó de repetirse) o «Reconocida».
+
+  var EPISODE_FAMILY = {
+    TEMPERATURE_ABOVE_LIMIT: "tempHigh", TEMPERATURE_BELOW_LIMIT: "tempLow",
+    HUMIDITY_ABOVE_LIMIT: "humHigh", HUMIDITY_BELOW_LIMIT: "humLow",
+    TEMPERATURE_INCREASE: "tempChange", TEMPERATURE_DECREASE: "tempChange",
+    HUMIDITY_INCREASE: "humChange", HUMIDITY_DECREASE: "humChange",
+    DATA_GAP: "noData", POSSIBLE_DISCONNECTION: "noData",
+    CAMERA_FAILURE: "camera", SENSOR_NOT_DETECTED: "camera",
+    OCR_FAILURE: "reading", OCR_UNCERTAIN: "reading", LOW_CONFIDENCE: "reading", OCR_CORRECTION: "reading",
+    POSSIBLE_STALE_READING: "stale", READING_UNCHANGED: "stale",
+  };
+  var EPISODE_KIND = { tempHigh: "Manejo", tempLow: "Manejo", humHigh: "Manejo", humLow: "Manejo", tempChange: "Manejo", humChange: "Manejo", noData: "Sistema", camera: "Sistema", reading: "Sistema", stale: "Sistema" };
+  var SEV_RANK = { INFO: 0, WARNING: 1, CRITICAL: 2 };
+
+  /**
+   * @param events   eventos (cualquier orden), incluidos los INFO «RETURN_TO_RANGE»
+   * @param readings lecturas del mismo periodo (para el máximo/mínimo del episodio)
+   * @returns [{ id, sensorId, family, kind, start, last, end, status, severity, count,
+   *            eventIds, limit, peak: { v, ts, kind: "max"|"min" } | null, text }]
+   *          del más reciente al más antiguo
+   */
+  function alertEpisodes(events, readings, sensors, S, now) {
+    var gap = Math.max(6 * (S.intervalSec || 60) * 1000, 60 * 60000);
+    var bySensor = {};
+    (sensors || []).forEach(function (s) { bySensor[s.id] = s; });
+    var evs = (events || []).slice().sort(function (a, b) { return a.ts - b.ts; });
+    var open = {}, out = [];
+    evs.forEach(function (e) {
+      if (e.type === "RETURN_TO_RANGE") {
+        ["tempHigh", "tempLow", "humHigh", "humLow"].forEach(function (fam) {
+          var ep = open[e.sensorId + "|" + fam];
+          if (ep && !ep.resolvedAt) ep.resolvedAt = e.ts;
+        });
+        return;
+      }
+      var fam = EPISODE_FAMILY[e.type];
+      if (!fam || e.severity === "INFO") return;
+      var key = e.sensorId + "|" + fam, ep = open[key];
+      // si vuelve a pasar poco después de resolverse (oscila en el borde), es el mismo episodio
+      if (ep && ep.resolvedAt && e.ts - ep.resolvedAt <= gap) ep.resolvedAt = null;
+      if (!ep || ep.resolvedAt || e.ts - ep.last > gap) {
+        ep = { id: "ep-" + e.id, sensorId: e.sensorId, family: fam, kind: EPISODE_KIND[fam], start: e.ts, last: e.ts, resolvedAt: null, severity: e.severity, count: 0, eventIds: [], acked: 0, text: "", source: e.source };
+        open[key] = ep;
+        out.push(ep);
+      }
+      ep.last = e.ts;
+      ep.count++;
+      ep.eventIds.push(e.id);
+      if (e.ack) ep.acked++;
+      if (SEV_RANK[e.severity] > SEV_RANK[ep.severity]) ep.severity = e.severity;
+      ep.text = e.description || ep.text;
+      if (e.source === "simulation") ep.source = "simulation";
+    });
+    out.forEach(function (ep) {
+      var s = bySensor[ep.sensorId];
+      var stale = now - ep.last > gap;
+      ep.status = ep.acked === ep.count ? "Reconocida" : ep.resolvedAt || stale ? "Resuelta" : "Activa";
+      ep.end = ep.resolvedAt || (ep.status === "Activa" ? now : ep.last);
+      ep.limit = !s ? null : ep.family === "tempHigh" ? s.tempMax : ep.family === "tempLow" ? s.tempMin : ep.family === "humHigh" ? s.humMax : ep.family === "humLow" ? s.humMin : null;
+      ep.peak = null;
+      if (s && /^(temp|hum)(High|Low)$/.test(ep.family)) {
+        var key = ep.family.indexOf("temp") === 0 ? controlKey(s) : "humidity", hi = /High$/.test(ep.family);
+        (readings || []).forEach(function (r) {
+          if (r.sensorId !== s.id || r.ts < ep.start - 60000 || r.ts > ep.end + 60000 || r[key] == null || !isReliable(r.level)) return;
+          if (!ep.peak || (hi ? r[key] > ep.peak.v : r[key] < ep.peak.v)) ep.peak = { v: r[key], ts: r.ts, kind: hi ? "max" : "min" };
+        });
+      }
+      delete ep.acked;
+    });
+    return out.sort(function (a, b) { return b.start - a.start; });
+  }
+
   root.MonLogic = {
+    alertEpisodes: alertEpisodes,
     actionItems: actionItems,
     minutesOutOfRange: minutesOutOfRange,
     slopePerMin: slopePerMin,

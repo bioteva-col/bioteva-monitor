@@ -14,44 +14,48 @@
 
 <header class="top">
   <div class="wrap topbar">
-    <div class="brand"><b>BioTeva</b><span>Monitoreo ambiental</span></div>
-    <div class="status-strip" aria-live="polite">
-      <span class="pill" id="camPill">CAMERA OFF</span>
-      <span class="pill" id="runPill">DETENIDO</span>
-      <span class="pill mono" id="lastPill">LAST READING: —</span>
-      <span class="pill mono" id="nextPill">NEXT READING: —</span>
-    </div>
+    <a class="brand" href="#dashboard" data-nav="dashboard"><b>BioTeva</b><span>Monitor</span></a>
     <div class="spacer"></div>
+    <span class="status-pill" id="statusPill" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="statusText">Detenido</span></span>
     <div class="top-actions">
       <button class="btn primary" id="runBtn" type="button">▶ Iniciar monitoreo</button>
-      <button class="btn" id="nowBtn" type="button">Leer ahora</button>
-      <button class="btn" id="xlsxBtn" type="button" title="Exporta los últimos 30 días">⤓ Exportar Excel</button>
-      <button class="btn" id="installBtn" type="button" hidden>⊕ Instalar app</button>
-      <a class="btn ghost" href="#ayuda" id="helpBtn" title="Cómo usar la app">❓ Ayuda</a>
-      <button class="icon-btn" id="themeBtn" type="button" title="Cambiar tema" aria-label="Cambiar tema">◐</button>
+      <button class="btn hide-sm" id="nowBtn" type="button">Leer ahora</button>
+      <button class="btn hide-sm" id="installBtn" type="button" hidden>Instalar app</button>
+      <button class="icon-btn" id="themeBtn" type="button" aria-label="Cambiar modo claro / oscuro"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"></path></svg></button>
     </div>
   </div>
   <div class="wrap">
-    <nav class="tabs" role="tablist" aria-label="Secciones del monitoreo" id="tabs">
-      <button class="tab" role="tab" data-view="dashboard" aria-selected="true">Dashboard</button>
-      <button class="tab" role="tab" data-view="camara" aria-selected="false">Cámara</button>
-      <button class="tab" role="tab" data-view="calibracion" aria-selected="false">Calibración</button>
-      <button class="tab" role="tab" data-view="termico" aria-selected="false">Control térmico</button>
-      <button class="tab" role="tab" data-view="sensores" aria-selected="false">Sensores</button>
-      <button class="tab" role="tab" data-view="historico" aria-selected="false">Histórico</button>
-      <button class="tab" role="tab" data-view="graficas" aria-selected="false">Gráficas</button>
-      <button class="tab" role="tab" data-view="alertas" aria-selected="false">Alertas <span class="count" id="alertCount">0</span></button>
-      <button class="tab" role="tab" data-view="reportes" aria-selected="false">Reportes</button>
-      <button class="tab" role="tab" data-view="configuracion" aria-selected="false">Configuración</button>
-      <button class="tab help-tab" role="tab" data-view="ayuda" aria-selected="false">❓ Cómo usar</button>
+    <nav class="tabs" role="tablist" aria-label="Secciones" id="tabs">
+      <button class="tab" role="tab" data-view="dashboard" aria-selected="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"></path></svg>Inicio</button>
+      <button class="tab" role="tab" data-view="caja" aria-selected="false"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V4M4 20h16M8 16l4-5 3 3 5-7"></path></svg>Cajas y gráficas</button>
+      <button class="tab" role="tab" data-view="alertas" aria-selected="false"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4zM10 21h4"></path></svg>Alertas <span class="count" id="alertCount">0</span></button>
+      <button class="tab" role="tab" data-view="ajustes" aria-selected="false"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"></path><circle cx="16" cy="6" r="2"></circle><circle cx="10" cy="12" r="2"></circle><circle cx="18" cy="18" r="2"></circle></svg>Ajustes</button>
     </nav>
   </div>
 </header>
+<nav class="bottom-nav" aria-label="Secciones" id="bottomNav">
+  <button type="button" data-view="dashboard" aria-selected="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"></path></svg>Inicio</button>
+  <button type="button" data-view="caja" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V4M4 20h16M8 16l4-5 3 3 5-7"></path></svg>Gráficas</button>
+  <button type="button" data-view="alertas" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4zM10 21h4"></path></svg>Alertas <span class="count" id="alertCount2">0</span></button>
+  <button type="button" data-view="ajustes" aria-selected="false"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"></path><circle cx="16" cy="6" r="2"></circle><circle cx="10" cy="12" r="2"></circle><circle cx="18" cy="18" r="2"></circle></svg>Ajustes</button>
+</nav>
 
 <div class="wrap" id="banners"></div>
 <div class="wrap"><div id="bootMsg" class="boot" role="status">Cargando BioTeva Monitor…</div></div>
 
-<main class="wrap">
+<main class="wrap" id="main">
+  <nav class="side" id="sideNav" aria-label="Ajustes" hidden>
+    <button type="button" data-view="sensores">Sensores y límites</button>
+    <button type="button" data-view="datos">Datos y conexiones</button>
+    <button type="button" data-view="camara">Lecturas y cámara</button>
+    <button type="button" data-view="calibracion">Calibrar la cámara</button>
+    <button type="button" data-view="termico">Lámparas</button>
+    <button type="button" data-view="historico">Historial de lecturas</button>
+    <button type="button" data-view="reportes">Reportes</button>
+    <button type="button" data-view="graficas">Gráficas por periodo</button>
+    <button type="button" data-view="configuracion">Avanzado</button>
+    <button type="button" data-view="ayuda">Cómo usar</button>
+  </nav>
   <!-- ───────────── DASHBOARD ───────────── -->
   <section data-view="dashboard" class="col"></section>
 
@@ -121,82 +125,106 @@
     </div>
   </section>
 
-  <!-- ───────────── CALIBRACIÓN ───────────── -->
+  <!-- ───────────── CALIBRACIÓN (asistente: encuadra → compara → acepta) ───────────── -->
   <section data-view="calibracion" class="col" hidden>
-    <div class="panel">
-      <header>
-        <h2>Calibrar sensor</h2><div class="spacer"></div>
-        <div class="seg small" role="radiogroup" aria-label="Sensor a calibrar" id="calSensorGroup">
-          <label><input type="radio" name="calSensor" value="A" checked /> <span>Sensor A</span></label>
-          <label><input type="radio" name="calSensor" value="B" /> <span>Sensor B</span></label>
-        </div>
-        <button class="btn" id="calFreeze" type="button" aria-pressed="false">Congelar imagen</button>
-      </header>
-      <div class="panel-body col">
-        <div class="auto-box">
+    <div class="row-actions"><button class="btn ghost" type="button" id="calExit">← Salir de la calibración</button></div>
+    <div class="cal-head col" style="gap:6px">
+      <h1>Calibrar la cámara</h1>
+      <p>Le enseñamos a la app dónde está cada sensor. Son 3 pasos por sensor y toma unos 2 minutos.</p>
+    </div>
+    <ol class="cal-progress" id="calProgress" aria-label="Progreso"></ol>
+
+    <div class="cal-step" id="calStep1">
+      <div class="cal-visual">
+        <div class="canvas-box"><canvas id="calCanvas" width="1280" height="720" tabindex="0" aria-label="Imagen de la cámara: dibuja un rectángulo sobre la pantalla del sensor"></canvas></div>
+        <span class="cam-note">Cámara en vivo · el video no sale de este computador.</span>
+        <details class="cal-adv">
+          <summary>Más opciones</summary>
           <div class="row-actions">
-            <button class="btn primary" id="calDetect" type="button">🔍 Detectar pantallas automáticamente</button>
-            <button class="btn" id="calSwap" type="button">Intercambiar A ↔ B</button>
-            <button class="btn" id="calCopy" type="button">Copiar regiones de valores al otro sensor</button>
+            <button class="btn small" id="calFreeze" type="button" aria-pressed="false">Congelar imagen</button>
+            <button class="btn small" id="calSwap" type="button">Intercambiar A ↔ B</button>
+            <button class="btn small" id="calCopy" type="button">Copiar zonas al otro sensor</button>
+            <button class="btn small" id="calShot" type="button">Descargar imagen de la cámara</button>
           </div>
-          <label class="f inline"><input type="checkbox" id="calTrack" /> <span><b>Seguir esta pantalla si se mueve</b> (se reubica sola en cada lectura)</span></label>
+          <div class="row-actions">
+            <button class="btn small" type="button" data-cal="rot-">↺ Rotar −1°</button>
+            <button class="btn small" type="button" data-cal="rot+">↻ Rotar +1°</button>
+            <button class="btn small" type="button" data-cal="scale-">− Escala</button>
+            <button class="btn small" type="button" data-cal="scale+">+ Escala</button>
+            <button class="btn small ghost" type="button" data-cal="reset">Restablecer</button>
+          </div>
+          <label class="f inline"><input type="checkbox" id="calTrack" /> <span>Seguir la pantalla si el sensor se mueve (si la cámara queda quieta, déjalo apagado)</span></label>
+        </details>
+      </div>
+      <div class="cal-card">
+        <span class="step-n" data-step-n>Paso 1 de 3 · Sensor A</span>
+        <h2>Encuadra la pantalla del sensor</h2>
+        <p>Dibuja un rectángulo sobre <b>la pantalla gris</b> del sensor <span data-sensor-letter>A</span> (o toca su centro). La app lo ajusta sola a la pantalla.</p>
+        <p class="muted-text">Si no lo ves, acerca la cámara o enciende la luz del cuarto.</p>
+        <span class="msg" id="calMsg" role="status"></span>
+        <button class="btn primary big" id="calNext1" type="button">Listo, se ve bien</button>
+        <button class="btn" type="button" data-cal="snap">Ajustar de nuevo a la pantalla</button>
+        <button class="btn" id="calDetect" type="button">Buscar las pantallas automáticamente</button>
+      </div>
+    </div>
+
+    <div class="cal-step" id="calStep2" hidden>
+      <div class="cal-visual">
+        <span class="box-label">Lo que ve la app</span>
+        <div class="canvas-box rect"><canvas id="rectCanvas" width="480" height="386" aria-label="Pantalla del sensor enderezada con las zonas de lectura"></canvas></div>
+        <details class="cal-adv">
+          <summary>Opciones avanzadas</summary>
+          <p class="hint">Normalmente no hace falta. Para mover a mano una zona de lectura: elige el valor y dibuja su zona en la imagen de arriba.</p>
+          <div class="seg small" role="radiogroup" aria-label="Zona a dibujar" id="calFieldGroup">
+            <label><input type="radio" name="calField" value="tempIn" checked /> <span>Temp. cuarto (IN)</span></label>
+            <label><input type="radio" name="calField" value="tempOut" /> <span>Temp. caja (OUT)</span></label>
+            <label><input type="radio" name="calField" value="humidity" /> <span>Humedad</span></label>
+            <label><input type="radio" name="calField" value="time" /> <span>Hora</span></label>
+          </div>
+          <label class="f inline"><span>Inclinación de los dígitos</span><input type="range" id="calSlant" min="-20" max="20" step="1" /><output id="calSlantOut">0°</output></label>
+          <label class="f inline"><input type="checkbox" id="calLight" /> <span>Segmentos claros sobre fondo oscuro (pantalla con luz)</span></label>
+          <div class="table-scroll"><table class="compact" id="calFields"></table></div>
+        </details>
+      </div>
+      <div class="cal-card">
+        <span class="step-n" data-step-n>Paso 2 de 3 · Sensor A</span>
+        <h2>Compara con el sensor</h2>
+        <p>Mira la pantalla del sensor y escribe lo que ves. Si algo no coincide, la app se ajusta sola.</p>
+        <div class="cmp" id="calCmp">
+          <span></span><span class="h">La app lee</span><span class="h">Tú ves</span>
+          <label class="lbl" for="exOut">Temp. caja (OUT)</label><span class="app" id="calApp_tempOut">—</span><input id="exOut" class="big-num" inputmode="decimal" autocomplete="off" />
+          <label class="lbl" for="exIn">Temp. cuarto (IN)</label><span class="app" id="calApp_tempIn">—</span><input id="exIn" class="big-num" inputmode="decimal" autocomplete="off" />
+          <label class="lbl" for="exHum">Humedad</label><span class="app" id="calApp_humidity">—</span><input id="exHum" class="big-num" inputmode="numeric" autocomplete="off" />
+          <label class="lbl" for="exTime">Hora</label><span class="app" id="calApp_time">—</span><input id="exTime" class="big-num" autocomplete="off" />
         </div>
-        <div class="cal-flow" id="calFlow" role="status" aria-live="polite"></div>
-        <div class="cal-grid">
-          <div class="col">
-            <div class="canvas-box"><canvas id="calCanvas" width="1280" height="720" tabindex="0" aria-label="Imagen de la cámara: arrastra para marcar el sensor"></canvas></div>
-            <div class="cal-read" id="calRead" aria-live="polite"></div>
-            <div class="cal-example">
-              <p><b>¿Lo que lee la app no es lo que muestra el sensor?</b> Escribe aquí lo que ves en la pantalla del sensor y pulsa <b>Ajustar a estos valores</b>: la app mueve sola los cuadros hasta leer exactamente eso.</p>
-              <div class="ex-grid">
-                <label class="f"><span>Temp. IN</span><input id="exIn" inputmode="decimal" placeholder="25.5" autocomplete="off" /></label>
-                <label class="f"><span>Temp. OUT</span><input id="exOut" inputmode="decimal" placeholder="22.3" autocomplete="off" /></label>
-                <label class="f"><span>Humedad</span><input id="exHum" inputmode="numeric" placeholder="42" autocomplete="off" /></label>
-                <label class="f"><span>Hora</span><input id="exTime" placeholder="12:41" autocomplete="off" /></label>
-              </div>
-              <button class="btn" id="exFit" type="button">🎯 Ajustar a estos valores</button>
-              <span class="msg" id="exMsg" role="status"></span>
-            </div>
-            <div class="row-actions">
-              <button class="btn" type="button" data-cal="snap">🎯 Ajustar de nuevo a la pantalla</button>
-            </div>
-            <div class="row-actions accept-row">
-              <button class="btn primary big" id="calSave" type="button">✓ Aceptar ubicación del Sensor A</button>
-              <span class="msg" id="calMsg" role="status"></span>
-            </div>
-          </div>
-          <div class="col">
-            <h3 class="sub-h">Vista rectificada (perspectiva corregida)</h3>
-            <div class="canvas-box rect"><canvas id="rectCanvas" width="480" height="386" aria-label="Pantalla rectificada: arrastra para marcar la región del valor seleccionado"></canvas></div>
-            <details class="cal-adv">
-            <summary>Ajustes avanzados (normalmente no hace falta: la app los calcula sola)</summary>
-            <div class="row-actions">
-              <button class="btn" type="button" data-cal="rot-">↺ Rotar −1°</button>
-              <button class="btn" type="button" data-cal="rot+">↻ Rotar +1°</button>
-              <button class="btn" type="button" data-cal="scale-">− Escala 3 %</button>
-              <button class="btn" type="button" data-cal="scale+">+ Escala 3 %</button>
-              <button class="btn ghost" type="button" data-cal="reset">Restablecer</button>
-            </div>
-            <p class="hint">Para corregir a mano un cuadro de lectura: elige el valor y dibuja su región en la vista rectificada.</p>
-            <div class="seg small" role="radiogroup" aria-label="Región a dibujar" id="calFieldGroup">
-              <label><input type="radio" name="calField" value="tempIn" checked /> <span>Temp. IN</span></label>
-              <label><input type="radio" name="calField" value="tempOut" /> <span>Temp. OUT</span></label>
-              <label><input type="radio" name="calField" value="humidity" /> <span>Humedad</span></label>
-              <label><input type="radio" name="calField" value="time" /> <span>Hora</span></label>
-            </div>
-            <label class="f inline"><span>Inclinación de los dígitos</span><input type="range" id="calSlant" min="-20" max="20" step="1" /><output id="calSlantOut">0°</output></label>
-            <label class="f inline"><input type="checkbox" id="calLight" /> <span>Segmentos claros sobre fondo oscuro (display retroiluminado)</span></label>
-            <div class="table-scroll"><table class="compact" id="calFields"></table></div>
-            </details>
-          </div>
-        </div>
+        <div class="banner warn" id="calMismatch" hidden></div>
+        <span class="msg" id="exMsg" role="status"></span>
         <div class="row-actions">
-          <button class="btn ghost" id="calShot" type="button">⤓ Descargar imagen de la cámara (para revisar la detección)</button>
+          <button class="btn big" id="calBack2" type="button">Volver a encuadrar</button>
+          <button class="btn primary big" id="exFit" type="button" style="flex:1">Ajustar y seguir</button>
         </div>
       </div>
     </div>
+
+    <div class="cal-done" id="calStep3" hidden>
+      <span class="step-n" data-step-n>Paso 3 de 3 · Sensor A</span>
+      <div class="row-actions"><span class="chip ok" aria-hidden="true">✓</span><h2 style="font-size:28px">La app ya lee igual que el sensor</h2></div>
+      <div class="sum4" id="calSummary"></div>
+      <p>Si mueves la cámara o el sensor, tendrás que calibrar otra vez.</p>
+      <button class="btn primary big block" id="calSave" type="button">Aceptar y seguir con el sensor B</button>
+      <button class="btn ghost" id="calBack3" type="button">Volver a comparar</button>
+    </div>
+
+    <div class="cal-done" id="calDone" hidden style="align-items:center;text-align:center">
+      <h2 style="font-size:30px">Calibración lista</h2>
+      <p>Los sensores quedaron ubicados. Ya puedes empezar a monitorear.</p>
+      <button class="btn primary big block" id="calStartMon" type="button">Iniciar monitoreo</button>
+      <button class="btn ghost" id="calRestart" type="button">Calibrar de nuevo</button>
+    </div>
   </section>
 
+  <section data-view="caja" class="col" hidden></section>
+  <section data-view="datos" class="col" hidden></section>
   <section data-view="termico" class="col" hidden></section>
   <section data-view="sensores" class="col" hidden></section>
   <section data-view="historico" class="col" hidden></section>
