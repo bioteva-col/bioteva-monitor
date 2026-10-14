@@ -600,6 +600,13 @@
     const dayStart = L.dayBounds(L.dayKey(now)).from;
     const today = await App.store.readingsRange(dayStart, now);
     const cards = [];
+    // «Qué hacer ahora»: acciones concretas a partir de las lecturas, tus límites y las lámparas
+    const [recent3h, events24h] = await Promise.all([App.store.readingsRange(now - 3 * HOUR, now), App.store.eventsRange(now - DAY, now)]);
+    const todo = L.actionItems({ sensors: App.sensors, readings: recent3h, events: events24h, thermal: window.MonThermalUI && window.MonThermalUI.getStatus ? window.MonThermalUI.getStatus() : null, running: App.running, now, settings: S });
+    const KIND = { manejo: "Manejo", accidente: "Riesgo", sistema: "Sistema" };
+    const todoHtml = '<div class="panel todo"><header><h2>Qué hacer ahora</h2></header><div class="panel-body"><ul class="todo-list">' +
+      todo.map((t) => '<li class="todo-item ' + t.level + '"><span class="todo-tag">' + esc(t.level === "good" ? "OK" : KIND[t.kind] || "") + '</span><div><b>' + esc(t.title) + "</b><p>" + esc(t.action) + "</p></div></li>").join("") +
+      "</ul></div></div>";
     for (const s of App.sensors) {
       const last = App.latest[s.id] || (await App.store.lastReading(s.id));
       if (last) App.latest[s.id] = last;
@@ -636,6 +643,7 @@
             "<div><dt>Hoy (humedad)</dt><dd>" + (dH.n ? L.num(dH.min, 0) + "–" + L.num(dH.max, 0) + " % · prom " + L.num(dH.mean) + " %" : "sin datos") + "</dd></div>" +
             "<div><dt>Última hora</dt><dd>" + (hT.n ? "prom " + L.num(hT.mean) + " °C · " + L.num(hH.mean) + " %" : "sin datos") + "</dd></div>" +
             "<div><dt>Ubicación de la pantalla</dt><dd>" + esc(trackText(s)) + "</dd></div>" +
+            (() => { const o = L.minutesOutOfRange(mine, s, now, S); const out = o.tempHigh + o.tempLow + o.humHigh + o.humLow; return s.tempMin == null && s.tempMax == null && s.humMin == null && s.humMax == null ? "" : "<div><dt>Hoy fuera de tus límites</dt><dd>" + (out ? esc(fmtMinutes(o.tempHigh + o.tempLow)) + " temp. · " + esc(fmtMinutes(o.humHigh + o.humLow)) + " humedad" : "nada") + "</dd></div>"; })() +
             "<div><dt>Límites</dt><dd>" + (limT || limH ? esc([limT && "Temp. " + limT, limH && "Hum. " + limH].filter(Boolean).join(" · ")) : '<a href="#sensores" data-go="sensores">sin límites configurados</a>') + "</dd></div>" +
           "</dl>" +
         "</article>",
@@ -649,6 +657,7 @@
         '<span class="sub">Cada ' + esc(intervalLabel(S.intervalSec)) + " · fuente: " + esc({ camera: "cámara", image: "imagen estática", simulation: "simulación" }[S.frameSource]) + "</span></div></div>" +
         '<div class="panel preview-mini"><canvas id="dashPreview" width="1280" height="720" aria-label="Vista previa en vivo"></canvas></div>' +
       "</div>" +
+      todoHtml +
       '<div class="sensor-grid">' + cards.join("") + "</div>" +
       (window.MonThermalUI ? window.MonThermalUI.dashboardHtml() : "") +
       '<div class="panel"><header><h2>¿Hubo cambios importantes hoy?</h2><div class="spacer"></div><button class="btn" id="askToday" type="button">Analizar hoy</button></header><div class="panel-body"><div id="todayAnswer" class="answer muted-text">Pulsa «Analizar hoy» para revisar cambios bruscos, tendencias, valores fuera de rango, periodos sin datos y lecturas sospechosas.</div></div></div>' +
@@ -673,6 +682,8 @@
     if (!tk) return "seguimiento activo";
     return tk.ok ? "seguimiento activo · coincidencia " + Math.round(tk.score * 100) + " %" : "no encontrada en la imagen — ¿se movió fuera del encuadre?";
   }
+
+  function fmtMinutes(m) { return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; }
 
   function intervalLabel(sec) { return sec < 60 ? sec + " segundos" : sec / 60 + (sec === 60 ? " minuto" : " minutos"); }
 

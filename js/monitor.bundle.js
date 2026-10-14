@@ -3306,7 +3306,122 @@
     };
   }
 
+  // ─────────────────────────── «Qué hacer ahora» ───────────────────────────
+  //
+  // Convierte el estado actual en acciones concretas y priorizadas. Usa SOLO los
+  // límites que la persona configuró (Sensores) y los perfiles térmicos que definió
+  // (Control térmico); no inventa rangos para los grillos. Las causas se dicen como
+  // posibilidades a revisar, nunca como hechos («no se sabe si fue un corte de luz»).
+
+  /** Pendiente (°C o % por minuto) por mínimos cuadrados de [{ts, v}] (null si hay pocos puntos). */
+  function slopePerMin(points) {
+    var p = points.filter(function (x) { return x.v != null && isFinite(x.v); });
+    if (p.length < 3) return null;
+    var t0 = p[0].ts, n = p.length, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    p.forEach(function (q) { var x = (q.ts - t0) / 60000; sx += x; sy += q.v; sxx += x * x; sxy += x * q.v; });
+    var den = n * sxx - sx * sx;
+    return den ? (n * sxy - sx * sy) / den : null;
+  }
+
+  /** Minutos de hoy fuera de los límites configurados (temperatura de control y humedad). */
+  function minutesOutOfRange(readings, sensor, now, S) {
+    var ck = controlKey(sensor), mine = readings.filter(function (r) { return r.sensorId === sensor.id; }).sort(function (a, b) { return a.ts - b.ts; });
+    var out = { tempHigh: 0, tempLow: 0, humHigh: 0, humLow: 0, covered: 0 };
+    var maxGap = (S.intervalSec || 60) * 1000 * 2.5;
+    for (var i = 0; i < mine.length; i++) {
+      var r = mine[i], next = i + 1 < mine.length ? mine[i + 1].ts : Math.min(now, r.ts + (S.intervalSec || 60) * 1000);
+      var dt = Math.min(next - r.ts, maxGap) / 60000;
+      if (dt <= 0) continue;
+      out.covered += dt;
+      var t = r[ck], h = r.humidity;
+      if (t != null && sensor.tempMax != null && t > sensor.tempMax) out.tempHigh += dt;
+      if (t != null && sensor.tempMin != null && t < sensor.tempMin) out.tempLow += dt;
+      if (h != null && sensor.humMax != null && h > sensor.humMax) out.humHigh += dt;
+      if (h != null && sensor.humMin != null && h < sensor.humMin) out.humLow += dt;
+    }
+    Object.keys(out).forEach(function (k) { out[k] = Math.round(out[k]); });
+    return out;
+  }
+
+  /**
+   * ctx: { sensors, readings (≈ últimas 3 h, todas), events (≈ 24 h), thermal (estado del
+   * gateway o null), running, now, settings }
+   * @returns [{ level: "crit"|"warn"|"info"|"good", title, action, sensorId?, kind: "manejo"|"accidente"|"sistema" }]
+   */
+  function actionItems(ctx) {
+    var S = ctx.settings, now = ctx.now, items = [];
+    var push = function (level, kind, title, action, sensorId) { items.push({ level: level, kind: kind, title: title, action: action, sensorId: sensorId || null }); };
+    var unit = function (k) { return k === "humidity" ? " %" : " °C"; };
+    (ctx.sensors || []).filter(function (s) { return s.enabled; }).forEach(function (s) {
+      var ck = controlKey(s), lbl = ck === "tempOut" ? "temp. de la caja (OUT)" : "temp. (IN)";
+      var mine = (ctx.readings || []).filter(function (r) { return r.sensorId === s.id; }).sort(function (a, b) { return a.ts - b.ts; });
+      var last = mine.length ? mine[mine.length - 1] : null;
+      var st = currentStatus(s, last, now, S);
+      if (st.code === "SIN_DATOS") {
+        if (ctx.running || last) push(ctx.running ? "crit" : "info", "sistema", s.name + ": no llegan lecturas" + (last ? " desde " + fmtTime(last.ts) : ""),
+          ctx.running ? "Revisa que la cámara esté activa, que la ventana de la app siga abierta y que nada tape el sensor. (La app no sabe la causa: no afirma que haya sido un corte de luz.)" : "El monitoreo está detenido: toca ▶ Iniciar monitoreo.", s.id);
+        return;
+      }
+      var recent = mine.slice(-3);
+      if (recent.length && recent.every(function (r) { return !isReliable(r.level); })) {
+        push("warn", "sistema", s.name + ": la app no está leyendo bien los números", "Ve a Calibración, escribe lo que muestra el sensor y toca «Ajustar a estos valores». Revisa también reflejos de luz sobre la pantalla del sensor.", s.id);
+      }
+      if (s.tempMin == null && s.tempMax == null && s.humMin == null && s.humMax == null) {
+        push("info", "manejo", s.name + ": sin límites configurados", "Pon tus límites de temperatura y humedad en Sensores; sin ellos la app no puede avisarte cuando algo se sale de lo que necesitas.", s.id);
+      }
+      var t = last && last[ck], h = last && last.humidity;
+      if (t != null && s.tempMax != null && t > s.tempMax) push("crit", "manejo", s.name + ": " + lbl + " en " + num(t) + " °C, sobre tu máximo (" + num(s.tempMax) + " °C)", "Revisa si la lámpara quedó encendida de más, la ventilación y si la caja recibe sol directo.", s.id);
+      else if (t != null && s.tempMin != null && t < s.tempMin) push("crit", "manejo", s.name + ": " + lbl + " en " + num(t) + " °C, bajo tu mínimo (" + num(s.tempMin) + " °C)", "Revisa que la lámpara encienda, que el enchufe tenga corriente y que la caja esté cerrada.", s.id);
+      if (h != null && s.humMax != null && h > s.humMax) push("warn", "manejo", s.name + ": humedad " + num(h, 0) + " %, sobre tu máximo (" + num(s.humMax, 0) + " %)", "Revisa la ventilación, si hay condensación y si se regó agua o alimento húmedo.", s.id);
+      else if (h != null && s.humMin != null && h < s.humMin) push("warn", "manejo", s.name + ": humedad " + num(h, 0) + " %, bajo tu mínimo (" + num(s.humMin, 0) + " %)", "Revisa la fuente de agua/humedad de la caja.", s.id);
+      // tendencia: ¿llegará pronto al límite? (última hora)
+      var hour = mine.filter(function (r) { return r.ts >= now - 3600000 && isReliable(r.level); });
+      var sl = slopePerMin(hour.map(function (r) { return { ts: r.ts, v: r[ck] }; }));
+      if (sl != null && t != null) {
+        if (s.tempMax != null && t <= s.tempMax && sl > 0.02) {
+          var mins = (s.tempMax - t) / sl;
+          if (mins <= 60) push("warn", "manejo", s.name + ": la temperatura sube " + num(sl * 60) + " °C/h; llegaría a tu máximo en ~" + Math.max(1, Math.round(mins)) + " min", "Anticípate: revisa la lámpara y la ventilación antes de que pase el límite.", s.id);
+        }
+        if (s.tempMin != null && t >= s.tempMin && sl < -0.02) {
+          var mins2 = (t - s.tempMin) / -sl;
+          if (mins2 <= 60) push("warn", "manejo", s.name + ": la temperatura baja " + num(-sl * 60) + " °C/h; llegaría a tu mínimo en ~" + Math.max(1, Math.round(mins2)) + " min", "Anticípate: revisa que la lámpara encienda y que la caja esté cerrada.", s.id);
+        }
+      }
+      var evs = (ctx.events || []).filter(function (e) { return e.sensorId === s.id && !e.ack && e.ts >= now - 2 * 3600000; });
+      if (evs.some(function (e) { return e.type === "POSSIBLE_STALE_READING" || e.type === "READING_UNCHANGED"; })) push("warn", "sistema", s.name + ": la lectura no cambia hace rato", "¿La pantalla del sensor está congelada o con pila baja? Mírala directamente.", s.id);
+      var jumps = evs.filter(function (e) { return CHANGE_TYPES.indexOf(e.type) >= 0 && e.severity !== "INFO"; });
+      if (jumps.length) push("warn", "manejo", s.name + ": " + (EVENT_LABELS[jumps[jumps.length - 1].type] || "cambio brusco").toLowerCase() + " (" + fmtTime(jumps[jumps.length - 1].ts) + ")", "¿Se abrió la caja, se movió la lámpara o cambió la ventilación? Cuando lo revises, reconócela en Alertas.", s.id);
+    });
+    // diferencia entre cajas (dato para decidir, sin juicio)
+    var lastOf = function (s) { var m = (ctx.readings || []).filter(function (r) { return r.sensorId === s.id && isReliable(r.level); }); return m.length ? m[m.length - 1] : null; };
+    var en = (ctx.sensors || []).filter(function (s) { return s.enabled; });
+    if (en.length === 2) {
+      var a = lastOf(en[0]), b = lastOf(en[1]), ka = controlKey(en[0]), kb = controlKey(en[1]);
+      if (a && b && a[ka] != null && b[kb] != null && Math.abs(a[ka] - b[kb]) >= 3) push("info", "manejo", "Las cajas difieren " + num(Math.abs(a[ka] - b[kb])) + " °C (" + en[0].name + " " + num(a[ka]) + " · " + en[1].name + " " + num(b[kb]) + ")", "Si deberían estar iguales (mismo perfil), revisa la lámpara y la ventilación de la más alejada de su objetivo.");
+    }
+    // control térmico (lámparas)
+    ((ctx.thermal && ctx.thermal.boxes) || []).filter(function (bx) { return bx.enabled; }).forEach(function (bx) {
+      var stt = bx.state || {}, out = bx.reading ? bx.reading.out : null, prof = bx.profile || {};
+      if (stt.safety) push("crit", "accidente", bx.name + ": apagado de seguridad por sobrecalentamiento", "La lámpara se apagó sola. Revisa la caja (ventilación, sol directo, otra fuente de calor). Volverá a encender cuando baje a la temperatura de recuperación.");
+      if (bx.device === "UNREACHABLE" || stt.heater === "UNREACHABLE") push("crit", "accidente", bx.name + ": sin comunicación con el enchufe", "La lámpara podría quedar como estaba. Revisa que el enchufe tenga corriente y Wi-Fi.");
+      if (bx.mode === "MANUAL_ON") push("warn", "accidente", bx.name + ": lámpara en MANUAL encendida", "No se apaga sola por temperatura (sí por seguridad). Vuelve a AUTO cuando termines.");
+      var boxRead = (ctx.readings || []).filter(function (r) { return r.sensorId === bx.sensorId && r.ts >= now - 45 * 60000 && isReliable(r.level); });
+      var sl2 = slopePerMin(boxRead.map(function (r) { return { ts: r.ts, v: r.tempOut }; }));
+      if (stt.heater === "ON" && stt.onSince && now - stt.onSince > 45 * 60000 && sl2 != null && sl2 <= 0 && prof.onAt != null && out != null && out < prof.onAt)
+        push("warn", "accidente", bx.name + ": la lámpara lleva " + Math.round((now - stt.onSince) / 60000) + " min encendida y la caja no se calienta", "¿Bombillo quemado, lámpara desconectada o caja abierta? Revísala.");
+      if ((stt.heater === "OFF" || bx.mode === "MANUAL_OFF") && sl2 != null && sl2 > 0.03 && prof.offAt != null && out != null && out > prof.offAt)
+        push("crit", "accidente", bx.name + ": la caja se calienta con la lámpara apagada (" + num(sl2 * 60) + " °C/h)", "Hay otra fuente de calor: sol directo, otra lámpara o un equipo cerca. Revísala ya.");
+    });
+    var order = { crit: 0, warn: 1, info: 2, good: 3 };
+    items.sort(function (x, y) { return order[x.level] - order[y.level]; });
+    if (!items.some(function (i) { return i.level === "crit" || i.level === "warn"; })) items.unshift({ level: "good", kind: "sistema", title: "Todo en orden", action: "No hay nada urgente que revisar. La app sigue vigilando.", sensorId: null });
+    return items;
+  }
+
   root.MonLogic = {
+    actionItems: actionItems,
+    minutesOutOfRange: minutesOutOfRange,
+    slopePerMin: slopePerMin,
     buildSummary: buildSummary,
     FIELD_KEYS: FIELD_KEYS,
     FIELD_LABELS: FIELD_LABELS,
@@ -5028,6 +5143,13 @@
     const dayStart = L.dayBounds(L.dayKey(now)).from;
     const today = await App.store.readingsRange(dayStart, now);
     const cards = [];
+    // «Qué hacer ahora»: acciones concretas a partir de las lecturas, tus límites y las lámparas
+    const [recent3h, events24h] = await Promise.all([App.store.readingsRange(now - 3 * HOUR, now), App.store.eventsRange(now - DAY, now)]);
+    const todo = L.actionItems({ sensors: App.sensors, readings: recent3h, events: events24h, thermal: window.MonThermalUI && window.MonThermalUI.getStatus ? window.MonThermalUI.getStatus() : null, running: App.running, now, settings: S });
+    const KIND = { manejo: "Manejo", accidente: "Riesgo", sistema: "Sistema" };
+    const todoHtml = '<div class="panel todo"><header><h2>Qué hacer ahora</h2></header><div class="panel-body"><ul class="todo-list">' +
+      todo.map((t) => '<li class="todo-item ' + t.level + '"><span class="todo-tag">' + esc(t.level === "good" ? "OK" : KIND[t.kind] || "") + '</span><div><b>' + esc(t.title) + "</b><p>" + esc(t.action) + "</p></div></li>").join("") +
+      "</ul></div></div>";
     for (const s of App.sensors) {
       const last = App.latest[s.id] || (await App.store.lastReading(s.id));
       if (last) App.latest[s.id] = last;
@@ -5064,6 +5186,7 @@
             "<div><dt>Hoy (humedad)</dt><dd>" + (dH.n ? L.num(dH.min, 0) + "–" + L.num(dH.max, 0) + " % · prom " + L.num(dH.mean) + " %" : "sin datos") + "</dd></div>" +
             "<div><dt>Última hora</dt><dd>" + (hT.n ? "prom " + L.num(hT.mean) + " °C · " + L.num(hH.mean) + " %" : "sin datos") + "</dd></div>" +
             "<div><dt>Ubicación de la pantalla</dt><dd>" + esc(trackText(s)) + "</dd></div>" +
+            (() => { const o = L.minutesOutOfRange(mine, s, now, S); const out = o.tempHigh + o.tempLow + o.humHigh + o.humLow; return s.tempMin == null && s.tempMax == null && s.humMin == null && s.humMax == null ? "" : "<div><dt>Hoy fuera de tus límites</dt><dd>" + (out ? esc(fmtMinutes(o.tempHigh + o.tempLow)) + " temp. · " + esc(fmtMinutes(o.humHigh + o.humLow)) + " humedad" : "nada") + "</dd></div>"; })() +
             "<div><dt>Límites</dt><dd>" + (limT || limH ? esc([limT && "Temp. " + limT, limH && "Hum. " + limH].filter(Boolean).join(" · ")) : '<a href="#sensores" data-go="sensores">sin límites configurados</a>') + "</dd></div>" +
           "</dl>" +
         "</article>",
@@ -5077,6 +5200,7 @@
         '<span class="sub">Cada ' + esc(intervalLabel(S.intervalSec)) + " · fuente: " + esc({ camera: "cámara", image: "imagen estática", simulation: "simulación" }[S.frameSource]) + "</span></div></div>" +
         '<div class="panel preview-mini"><canvas id="dashPreview" width="1280" height="720" aria-label="Vista previa en vivo"></canvas></div>' +
       "</div>" +
+      todoHtml +
       '<div class="sensor-grid">' + cards.join("") + "</div>" +
       (window.MonThermalUI ? window.MonThermalUI.dashboardHtml() : "") +
       '<div class="panel"><header><h2>¿Hubo cambios importantes hoy?</h2><div class="spacer"></div><button class="btn" id="askToday" type="button">Analizar hoy</button></header><div class="panel-body"><div id="todayAnswer" class="answer muted-text">Pulsa «Analizar hoy» para revisar cambios bruscos, tendencias, valores fuera de rango, periodos sin datos y lecturas sospechosas.</div></div></div>' +
@@ -5101,6 +5225,8 @@
     if (!tk) return "seguimiento activo";
     return tk.ok ? "seguimiento activo · coincidencia " + Math.round(tk.score * 100) + " %" : "no encontrada en la imagen — ¿se movió fuera del encuadre?";
   }
+
+  function fmtMinutes(m) { return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; }
 
   function intervalLabel(sec) { return sec < 60 ? sec + " segundos" : sec / 60 + (sec === 60 ? " minuto" : " minutos"); }
 
@@ -6509,6 +6635,7 @@
   window.MonThermalUI = {
     attach(app, helpers) { App = app; H = helpers; },
     poll, onCycle, render, dashboardHtml, bindModeButtons,
+    getStatus: () => (S.online ? S.status : null),
     get online() { return S.online; },
   };
 })();

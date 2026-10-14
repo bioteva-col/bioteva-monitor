@@ -328,3 +328,15 @@ input.num { width: 84px; }
 .guide .dot.good { background: #1baf7a; } .guide .dot.warn { background: #eda100; } .guide .dot.crit { background: #e34948; } .guide .dot.muted { background: #8a9086; }
 .guide-faq dt { font-weight: 700; margin-top: 10px; } .guide-faq dd { margin: 4px 0 0; line-height: 1.5; }
 .help-tab { font-weight: 700; }
+
+/* «Qué hacer ahora» */
+.todo-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.todo-item { display: grid; grid-template-columns: 86px 1fr; gap: 10px; align-items: start; border-left: 5px solid #8a9086; border-radius: 8px; padding: 8px 12px; background: rgba(127,127,127,.07); }
+.todo-item p { margin: 2px 0 0; line-height: 1.45; }
+.todo-item b { font-size: 16px; }
+.todo-tag { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; text-align: center; background: rgba(127,127,127,.18); }
+.todo-item.crit { border-left-color: #e34948; } .todo-item.crit .todo-tag { background: #e34948; color: #fff; }
+.todo-item.warn { border-left-color: #eda100; } .todo-item.warn .todo-tag { background: #eda100; color: #1b211b; }
+.todo-item.info { border-left-color: #2a78d6; }
+.todo-item.good { border-left-color: #1baf7a; } .todo-item.good .todo-tag { background: #1baf7a; color: #fff; }
+@media (max-width: 520px) { .todo-item { grid-template-columns: 1fr; } }
