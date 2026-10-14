@@ -318,9 +318,10 @@
   const isTracking = (s) => !!(s.calibration.track && s.calibration.track.enabled !== false);
 
   /** Fija un sensor sobre una pantalla (LCD, px): esquinas + plantilla para seguirla + referencia. */
-  function lockSensorOn(sensor, gray, quadPxLcd) {
+  function lockSensorOn(sensor, gray, quadPxLcd, fields) {
     const cal = sensor.calibration;
     cal.quad = normQuad(quadPxLcd, gray.w, gray.h);
+    if (fields) cal.fields = fields;
     cal.track = { enabled: cal.track ? cal.track.enabled !== false : true, tpl: Seg.makeTemplate(gray, quadPxLcd) };
     const a = analyzeSensor(sensor, gray, cal, false);
     cal.reference = Seg.thumbToB64(a.thumb);
@@ -329,18 +330,34 @@
     App.track.tplRefreshed[sensor.id] = Date.now();
   }
 
+  /**
+   * Pantallas HTC-2 en toda la imagen: primero por su patrón de dígitos (sirve aunque
+   * el LCD no tenga marco oscuro) y, si faltan, por el marco; solo se aceptan
+   * candidatos con dígitos (verificados), nunca camisas, cajas u otros objetos.
+   */
+  function findScreens(gray, need) {
+    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need };
+    const found = Seg.detectHtc2(gray, base, opts);
+    if (found.length < need) {
+      Seg.detectLcds(gray).forEach((c) => {
+        if (found.some((f) => Seg.pointInQuad(f.quad, Seg.quadCenter(c.quad)))) return;
+        const sn = Seg.snapHtc2(gray, c.quad.map((p, i, q) => { const cc = Seg.quadCenter(q); return { x: cc.x + (p.x - cc.x) * 1.15, y: cc.y + (p.y - cc.y) * 1.15 }; }), base, opts);
+        if (sn && sn.score >= 0.22) found.push({ quad: sn.quad, fields: sn.fields, area: Seg.quadArea(sn.quad), score: sn.score * 1000, kind: "marco" });
+      });
+    }
+    return found.slice(0, 6);
+  }
+
   /** Detecta pantallas en toda la imagen y asigna las que falten (izquierda → A, derecha → B). */
   function autoAssign(gray, sensors, force) {
-    const raw = Seg.detectLcds(gray);
-    // los sensores son del mismo tamaño aprox.: se descartan marcas mucho más pequeñas que la mejor
-    const found = raw.filter((c) => c.area >= raw[0].area * 0.3).slice(0, 6);
+    const found = findScreens(gray, sensors.length);
     App.cal.candidates = { list: found, w: gray.w, h: gray.h };
     App.cal.candidatesAt = Date.now();
     const targets = sensors.filter((s) => force || !(s.calibration.track && s.calibration.track.tpl));
     const taken = sensors.filter((s) => !targets.includes(s)).map((s) => pxQuad(s.calibration.quad, gray.w, gray.h));
     const free = found.filter((f) => !taken.some((t) => Seg.pointInQuad(t, Seg.quadCenter(f.quad))));
     const pick = free.slice(0, targets.length).sort((a, b) => Seg.quadCenter(a.quad).x - Seg.quadCenter(b.quad).x);
-    targets.sort((a, b) => (a.id < b.id ? -1 : 1)).forEach((s, i) => { if (pick[i]) lockSensorOn(s, gray, pick[i].quad); });
+    targets.sort((a, b) => (a.id < b.id ? -1 : 1)).forEach((s, i) => { if (pick[i]) lockSensorOn(s, gray, pick[i].quad, pick[i].fields); });
     return { found: found.length, assigned: Math.min(pick.length, targets.length) };
   }
 
@@ -348,11 +365,14 @@
   function trackOnFrame(gray, sensors) {
     const list = sensors.filter(isTracking);
     if (!list.length) return;
-    // sensores que nunca se ubicaron → reconocimiento automático
-    if (list.some((s) => !s.calibration.track.tpl)) autoAssign(gray, list, false);
+    // sensores que nunca se ubicaron → reconocimiento automático (como mucho cada 30 s: es costoso)
+    if (list.some((s) => !s.calibration.track.tpl) && Date.now() - (App.track.lastAuto || 0) > 30000) {
+      App.track.lastAuto = Date.now();
+      autoAssign(gray, list, false);
+    }
     const ready = list.filter((s) => s.calibration.track.tpl);
     if (!ready.length) return;
-    const res = Seg.trackScreens(gray, ready.map((s) => ({ id: s.id, tpl: s.calibration.track.tpl, last: pxQuad(s.calibration.quad, gray.w, gray.h) })));
+    const res = Seg.trackScreens(gray, ready.map((s) => ({ id: s.id, tpl: s.calibration.track.tpl, last: pxQuad(s.calibration.quad, gray.w, gray.h), fields: s.calibration.fields })), { slantDeg: ready[0].calibration.slantDeg });
     const now = Date.now();
     let changed = false;
     ready.forEach((s) => {
@@ -839,8 +859,48 @@
     $("#calLight").checked = !!App.cal.draft.lightSegments;
     $("#calTrack").checked = !App.cal.draft.track || App.cal.draft.track.enabled !== false;
     $("#calMsg").textContent = "";
+    $("#calSave").textContent = "✓ Aceptar ubicación del " + s.name;
+    renderCalFlow();
     buildCalTable();
     drawCalibration(true);
+  }
+
+  /** Guía de la calibración: qué sensor falta ubicar y qué hacer ahora. */
+  function renderCalFlow() {
+    const host = $("#calFlow");
+    if (!host) return;
+    const list = App.sensors.filter((x) => x.enabled);
+    const cur = sensorById(App.cal.sensorId);
+    const chips = list.map((x) => {
+      const ok = !!x.calibration.accepted;
+      return '<button type="button" class="chip ' + (ok ? "ok" : "todo") + (x.id === cur.id ? " cur" : "") + '" data-calgo="' + x.id + '">' + (ok ? "✓ " : "○ ") + esc(x.name) + (ok ? " ubicado" : " pendiente") + "</button>";
+    }).join("");
+    const allOk = list.every((x) => x.calibration.accepted);
+    const now = allOk && cur.calibration.accepted
+      ? "✓ Todos los sensores están ubicados. Puedes volver a ajustar cualquiera (elígelo arriba) o ir a <b>▶ Iniciar monitoreo</b>."
+      : "<b>Ahora: " + esc(cur.name) + ".</b> Haz <b>clic en el centro de su pantalla</b> o <b>arrastra un rectángulo</b> alrededor de ella (no hace falta exacto: se ajusta sola a la pantalla y coloca los cuadros sobre los números). Para moverlo, arrástralo desde adentro; las esquinas se pueden afinar. Revisa las lecturas de la derecha y pulsa <b>✓ Aceptar ubicación</b>.";
+    host.innerHTML = '<div class="chips">' + chips + '</div><div class="now">' + now + "</div>";
+    $$("[data-calgo]", host).forEach((b) => b.addEventListener("click", () => { App.cal.sensorId = b.dataset.calgo; App.cal.draft = null; openCalibration(); }));
+  }
+
+  /** Encaja el cuadrilátero (px del frame) a la pantalla del HTC-2 y ubica los campos sobre sus números. */
+  function snapDraft(quadPx) {
+    const fr = App.cal.lastFrame;
+    if (!fr || fr.error) return false;
+    const d = App.cal.draft, s = sensorById(App.cal.sensorId);
+    const sn = Seg.snapHtc2(fr.gray, quadPx, d.fields, { slantDeg: d.slantDeg, lightSegments: d.lightSegments });
+    if (!sn) {
+      d.quad = normQuad(quadPx, fr.gray.w, fr.gray.h);
+      drawCalibration(false);
+      calMsg("No se reconocieron los números de un HTC-2 en esa zona. Puedes ajustar las esquinas a mano, acercar la cámara o mejorar la luz.", "crit");
+      return false;
+    }
+    d.quad = normQuad(sn.quad, fr.gray.w, fr.gray.h);
+    d.fields = sn.fields;
+    drawCalibration(false);
+    const r = App.cal.lastRect, txt = r ? ["tempIn", "tempOut", "humidity"].map((k) => r.details[k] ? L.FIELD_LABELS[k] + " " + (r.details[k].text || "∅") : null).filter(Boolean).join(" · ") : "";
+    calMsg("Pantalla de " + s.name + " ajustada: " + txt + ". Si coincide con lo que muestra el sensor, pulsa «✓ Aceptar ubicación».", "good");
+    return true;
   }
 
   function drawCalibration(grab, given) {
@@ -937,11 +997,21 @@
   function fitAtClick(x, y) {
     const fr = App.cal.lastFrame;
     if (!fr || fr.error) return;
+    const W = fr.gray.w, H = fr.gray.h;
+    // tamaño esperado: el del otro sensor ya ubicado (son iguales) o ~1/5 del ancho
+    const other = App.sensors.find((o) => o.id !== App.cal.sensorId && o.calibration.accepted);
+    const oq = other ? pxQuad(other.calibration.quad, W, H) : null;
+    const lw = oq ? Math.hypot(oq[1].x - oq[0].x, oq[1].y - oq[0].y) : W * 0.16;
+    const tries = [1.7, 2.4];
+    for (const k of tries) {
+      const hw = (lw * k) / 2, hh = (lw * k * 0.8) / 2;
+      const q = [{ x: x - hw, y: y - hh }, { x: x + hw, y: y - hh }, { x: x + hw, y: y + hh }, { x: x - hw, y: y + hh }];
+      const sn = Seg.snapHtc2(fr.gray, q, App.cal.draft.fields, { slantDeg: App.cal.draft.slantDeg, lightSegments: App.cal.draft.lightSegments });
+      if (sn && Seg.pointInQuad(sn.quad, { x, y })) return snapDraft(q);
+    }
     const inner = Seg.fitLcdAt(fr.gray, { x, y });
-    if (!inner) return calMsg("No se reconoció una pantalla en ese punto. Haz clic en el centro de la pantalla del sensor, o arrastra un rectángulo a mano.", "crit");
-    App.cal.draft.quad = normQuad(inner, fr.gray.w, fr.gray.h);
-    drawCalibration(false);
-    calMsg("Pantalla de " + sensorById(App.cal.sensorId).name + " ajustada. Revisa la lectura de prueba y pulsa «Guardar calibración».", "good");
+    if (inner) return snapDraft(inner.map((p, i, qq) => { const c = Seg.quadCenter(qq); return { x: c.x + (p.x - c.x) * 1.2, y: c.y + (p.y - c.y) * 1.3 }; }));
+    calMsg("No se reconoció una pantalla en ese punto. Haz clic en el centro de la pantalla del sensor, o arrastra un rectángulo alrededor de ella.", "crit");
   }
 
   function canvasPoint(canvas, ev) {
@@ -979,6 +1049,11 @@
         const d = App.cal.draft, fr = App.cal.lastFrame, act = b.dataset.cal;
         const aspect = fr && fr.gray ? fr.gray.w / fr.gray.h : 16 / 9;
         if (act === "reset") { App.cal.draft = clone(L.defaultCalibration(App.cal.sensorId)); openCalibration(); return; }
+        if (act === "snap") {
+          if (!fr || !fr.gray) return calMsg("No hay imagen: activa la cámara.", "crit");
+          // un poco más grande que el cuadro actual, por si quedó corto
+          return snapDraft(transformQuad(pxQuad(d.quad, fr.gray.w, fr.gray.h), (p, cx, cy) => ({ x: cx + (p.x - cx) * 1.15, y: cy + (p.y - cy) * 1.2 })));
+        }
         if (act === "rot-" || act === "rot+") {
           const ang = ((act === "rot+" ? 1 : -1) * Math.PI) / 180, c = Math.cos(ang), s = Math.sin(ang);
           d.quad = transformQuad(d.quad, (p, cx, cy) => { const dx = (p.x - cx) * aspect, dy = p.y - cy; return { x: cx + (dx * c - dy * s) / aspect, y: cy + dx * s + dy * c }; });
@@ -998,7 +1073,8 @@
       const q = App.cal.draft.quad.map((o) => ({ x: o.x * W, y: o.y * H }));
       const hitR = 16 * p.scale;
       const corner = q.findIndex((c) => Math.hypot(c.x - p.x, c.y - p.y) < hitR);
-      App.cal.drag = corner >= 0 ? { mode: "corner", i: corner } : { mode: "rect", x0: p.x, y0: p.y };
+      const inside = corner < 0 && Seg.pointInQuad(q, p);
+      App.cal.drag = corner >= 0 ? { mode: "corner", i: corner } : inside ? { mode: "move", x0: p.x, y0: p.y, q0: App.cal.draft.quad.map((o) => ({ x: o.x, y: o.y })) } : { mode: "rect", x0: p.x, y0: p.y };
       canvas.setPointerCapture(ev.pointerId);
     });
     canvas.addEventListener("pointermove", (ev) => {
@@ -1007,7 +1083,11 @@
       const p = canvasPoint(canvas, ev), W = canvas.width, H = canvas.height;
       const nx = Math.max(0, Math.min(1, p.x / W)), ny = Math.max(0, Math.min(1, p.y / H));
       if (dr.mode === "corner") App.cal.draft.quad[dr.i] = { x: nx, y: ny };
-      else {
+      else if (dr.mode === "move") {
+        const dx = (p.x - dr.x0) / W, dy = (p.y - dr.y0) / H;
+        if (Math.abs(dx) * W > 3 || Math.abs(dy) * H > 3) dr.moved = true;
+        App.cal.draft.quad = dr.q0.map((o) => ({ x: o.x + dx, y: o.y + dy }));
+      } else {
         const x0 = dr.x0 / W, y0 = dr.y0 / H;
         if (Math.abs(nx - x0) * W < 10 || Math.abs(ny - y0) * H < 10) return;
         dr.moved = true;
@@ -1021,6 +1101,8 @@
       const dr = App.cal.drag;
       App.cal.drag = null;
       if (dr && dr.mode === "rect" && !dr.moved) fitAtClick(dr.x0, dr.y0);
+      else if (dr && dr.mode === "move" && !dr.moved) fitAtClick(dr.x0, dr.y0);
+      else if (dr && dr.mode === "rect" && dr.moved) { const fr = App.cal.lastFrame; if (fr && fr.gray) snapDraft(pxQuad(App.cal.draft.quad, fr.gray.w, fr.gray.h)); }
     });
     canvas.addEventListener("pointercancel", end);
 
@@ -1048,18 +1130,18 @@
     $("#calDetect").addEventListener("click", async () => {
       const fr = App.cal.lastFrame;
       if (!fr || fr.error) return calMsg("No hay imagen: activa la cámara o elige una fuente en «Cámara».", "crit");
-      calMsg("Buscando pantallas…");
-      await new Promise((r) => setTimeout(r, 20));
+      calMsg("Buscando pantallas (puede tardar unos segundos)…");
+      await new Promise((r) => setTimeout(r, 30));
       const res = autoAssign(fr.gray, App.sensors.filter((x) => x.enabled), true);
       await saveSensors();
       App.cal.draft = null;
       openCalibration();
-      if (!res.found) calMsg("No se detectaron pantallas. Haz clic sobre la pantalla de cada sensor (o acerca la cámara / mejora la luz).", "crit");
-      else calMsg("Se detectaron " + res.found + " pantalla(s) (#1, #2… en amarillo); se asignaron " + res.assigned + ". Revisa que Sensor A y B sean los correctos; si están al revés, usa «Intercambiar A ↔ B».", "good");
+      if (!res.found) calMsg("No se detectaron pantallas. Haz clic sobre la pantalla de cada sensor o arrastra un rectángulo alrededor (o acerca la cámara / mejora la luz).", "crit");
+      else calMsg("Se detectaron " + res.found + " pantalla(s) (en amarillo); se asignaron " + res.assigned + ". Revisa las lecturas de cada sensor, usa «Intercambiar A ↔ B» si están al revés y pulsa «✓ Aceptar ubicación» en cada uno.", "good");
     });
     $("#calSwap").addEventListener("click", async () => {
       const a = sensorById("A").calibration, b = sensorById("B").calibration;
-      ["quad", "track", "reference"].forEach((k) => { const t = a[k]; a[k] = b[k]; b[k] = t; });
+      ["quad", "track", "reference", "fields", "accepted"].forEach((k) => { const t = a[k]; a[k] = b[k]; b[k] = t; });
       await saveSensors();
       App.cal.draft = null;
       openCalibration();
@@ -1083,11 +1165,25 @@
       s.calibration = draft;
       const fr = App.cal.lastFrame;
       if (isTracking(s) && fr && fr.gray) lockSensorOn(s, fr.gray, pxQuad(draft.quad, fr.gray.w, fr.gray.h));
-      App.cal.draft = clone(draft);
+      s.calibration.accepted = Date.now();
+      App.cal.draft = clone(s.calibration);
       App.prevThumbs[s.id] = null;
       await saveSensors();
-      $("#calMsg").textContent = "Calibración de " + s.name + " guardada (" + new Date().toLocaleTimeString("es-CO") + ").";
-      $("#calMsg").className = "msg good";
+      const next = App.sensors.find((x) => x.enabled && x.id !== s.id && !x.calibration.accepted);
+      if (next) {
+        App.cal.sensorId = next.id;
+        App.cal.draft = null;
+        openCalibration();
+        calMsg("✓ Ubicación de " + s.name + " aceptada. Ahora ubica el " + next.name + ": haz clic en su pantalla o arrastra un rectángulo alrededor.", "good");
+      } else {
+        renderCalFlow();
+        calMsg("✓ Ubicación de " + s.name + " aceptada (" + new Date().toLocaleTimeString("es-CO") + ").", "good");
+      }
+    });
+    $("#calShot").addEventListener("click", () => {
+      const fr = App.cal.lastFrame;
+      if (!fr || fr.error || !fr.canvas) return calMsg("No hay imagen de la cámara para descargar.", "crit");
+      fr.canvas.toBlob((b) => b && download(b, "bioteva-camara-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".png"), "image/png");
     });
   }
 

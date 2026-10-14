@@ -138,15 +138,8 @@
             <button class="btn" id="calCopy" type="button">Copiar regiones de valores al otro sensor</button>
           </div>
           <label class="f inline"><input type="checkbox" id="calTrack" /> <span><b>Seguir esta pantalla si se mueve</b> (se reubica sola en cada lectura)</span></label>
-          <p class="hint">¿No la detecta? Haz <b>clic sobre la pantalla</b> del sensor seleccionado y se ajusta sola alrededor del clic. Si aun así no, arrastra un rectángulo a mano.</p>
         </div>
-        <ol class="steps">
-          <li>Activa la cámara (o elige imagen / simulación en <b>Cámara</b>).</li>
-          <li>Pulsa <b>Detectar pantallas</b> o haz <b>clic</b> sobre la pantalla del sensor (también puedes arrastrar un rectángulo).</li>
-          <li>Si hace falta, ajusta las 4 esquinas, la rotación y la escala.</li>
-          <li>En la vista rectificada, elige un valor y dibuja su región.</li>
-          <li>Revisa la lectura de prueba y pulsa <b>Guardar calibración</b>.</li>
-        </ol>
+        <div class="cal-flow" id="calFlow" role="status" aria-live="polite"></div>
         <div class="cal-grid">
           <div class="col">
             <div class="canvas-box"><canvas id="calCanvas" width="1280" height="720" tabindex="0" aria-label="Imagen de la cámara: arrastra para marcar el sensor"></canvas></div>
@@ -155,7 +148,12 @@
               <button class="btn" type="button" data-cal="rot+">↻ Rotar +1°</button>
               <button class="btn" type="button" data-cal="scale-">− Escala 3 %</button>
               <button class="btn" type="button" data-cal="scale+">+ Escala 3 %</button>
+              <button class="btn" type="button" data-cal="snap">🎯 Ajustar a la pantalla</button>
               <button class="btn ghost" type="button" data-cal="reset">Restablecer</button>
+            </div>
+            <div class="row-actions accept-row">
+              <button class="btn primary big" id="calSave" type="button">✓ Aceptar ubicación del Sensor A</button>
+              <span class="msg" id="calMsg" role="status"></span>
             </div>
           </div>
           <div class="col">
@@ -173,8 +171,7 @@
           </div>
         </div>
         <div class="row-actions">
-          <button class="btn primary" id="calSave" type="button">Guardar calibración</button>
-          <span class="msg" id="calMsg" role="status"></span>
+          <button class="btn ghost" id="calShot" type="button">⤓ Descargar imagen de la cámara (para revisar la detección)</button>
         </div>
       </div>
     </div>
