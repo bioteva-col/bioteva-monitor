@@ -397,6 +397,22 @@
    * @returns { text, confidence 0–100, contrast 0–100, blank, digits: [{ ch, conf, bits }] }
    */
   function decodeField(img, roi, opts) {
+    // Hora del HTC-2 («12:10»): los dos puntos dejan un hueco en el medio, así que las 4 cifras
+    // no están repartidas en partes iguales. Se leen horas y minutos como dos bloques de 2
+    // (medido en la foto del fabricante: horas 0–44 % del cuadro, minutos 56–100 %).
+    if (opts.format === "time" && opts.digits === 4 && !opts._part) {
+      // horas 0–23 (1.ª cifra vacía, 0, 1 o 2) y minutos 00–59 (1.ª cifra 0–5)
+      var hh = decodeField(img, { x: roi.x, y: roi.y, w: roi.w * 0.44, h: roi.h }, Object.assign({}, opts, { digits: 2, decimals: 0, format: "number", _part: true, allow: [" 012", "0123456789"] }));
+      var mm = decodeField(img, { x: roi.x + roi.w * 0.56, y: roi.y, w: roi.w * 0.44, h: roi.h }, Object.assign({}, opts, { digits: 2, decimals: 0, format: "number", _part: true, allow: ["012345", "0123456789"] }));
+      if (hh.blank && mm.blank) return { text: "", confidence: 0, contrast: Math.max(hh.contrast, mm.contrast), blank: true, digits: [] };
+      var hText = hh.text.trim(), mText = mm.text.trim();
+      var both = hText && mText.length === 2;
+      return {
+        text: both ? hText + ":" + mText : (hText || "") + (mText ? ":" + mText : ""),
+        confidence: both ? Math.min(hh.confidence, mm.confidence) : 0,
+        contrast: Math.max(hh.contrast, mm.contrast), blank: false, digits: (hh.digits || []).concat(mm.digits || []),
+      };
+    }
     var digits = opts.digits, decimals = opts.decimals || 0, light = !!opts.lightSegments;
     var tanSlant = Math.tan(((opts.slantDeg || 0) * Math.PI) / 180);
     var segInk = [], holes = [], all = [], ci, s;
@@ -444,6 +460,7 @@
         bits += zz > 0.5 ? "1" : "0";
       }
       var ranked = Object.keys(CANONICAL).filter(function (c) {
+        if (opts.allow && opts.allow[ci] && opts.allow[ci].indexOf(c) < 0) return false; // p. ej. hora: 1.ª cifra 0–2
         if (c === " ") return !seenVisible;         // blancos solo a la izquierda
         if (c === "-") return !seenVisible;         // signo solo como primer carácter
         return true;
@@ -1101,10 +1118,10 @@
 
   /** Distribución real del HTC-2 (igual que MonLogic.HTC2_FIELDS): el modelo siempre incluye la hora. */
   var HTC2_FIELDS_DEFAULT = {
-    tempIn: { x: 0.28, y: 0.0, w: 0.53, h: 0.3 },
-    tempOut: { x: 0.28, y: 0.34, w: 0.52, h: 0.28 },
-    humidity: { x: 0.55, y: 0.68, w: 0.32, h: 0.29 },
-    time: { x: 0.1, y: 0.71, w: 0.36, h: 0.24 },
+    tempIn: { x: 0.275, y: 0.0, w: 0.505, h: 0.315 },
+    tempOut: { x: 0.275, y: 0.337, w: 0.505, h: 0.293 },
+    humidity: { x: 0.53, y: 0.655, w: 0.312, h: 0.31 },
+    time: { x: 0.095, y: 0.752, w: 0.385, h: 0.19 },
   };
   /** Proporción ancho/alto del LCD del HTC-2 (480 × 386 en la vista enderezada). */
   var HTC2_ASPECT = 480 / 386;
@@ -1271,7 +1288,8 @@
             var t = { x: cur.x, y: cur.y, w: cur.w, h: cur.h, digits: cur.digits, decimals: cur.decimals };
             st(t, dir);
             if (t.x < 0 || t.y < 0 || t.x + t.w > 1 || t.y + t.h > 1) break;
-            if (Math.abs(t.x - field.x) > 0.3 * field.w || Math.abs(t.y - field.y) > 0.3 * field.h || t.w / field.w > 1.3 || t.w / field.w < 0.77 || t.h / field.h > 1.3 || t.h / field.h < 0.77) break;
+            var maxY = opts.format === "time" ? 0.1 : 0.3; // la hora tiene «AM/PM» justo encima
+            if (Math.abs(t.x - field.x) > 0.3 * field.w || Math.abs(t.y - field.y) > maxY * field.h || t.w / field.w > 1.3 || t.w / field.w < 0.77 || t.h / field.h > 1.3 || t.h / field.h < 0.77) break;
             var c = dec(t);
             if (c > bestC + 0.5) { bestC = c; cur = t; improved = true; } else break;
           }
@@ -1527,14 +1545,141 @@
    */
   function snapHtc2(frame, quad, base, opts) {
     opts = opts || {};
-    // 1) estructura real (separadores). Solo se acepta si lo que lee tiene forma de
-    //    temperatura y humedad; si no, se compara con el ajuste del modelo (2).
-    var real = !opts.noAngle && !opts.modelOnly ? locateHtc2(frame, quad, base, opts) : null;
-    if (real && plausibleHtc2(frame, real) >= 3) return real;
-    var model = snapModel(frame, quad, base, opts);
-    if (!real) return model;
-    if (!model) return plausibleHtc2(frame, real) >= 2 ? real : null;
-    return plausibleHtc2(frame, real) > plausibleHtc2(frame, model) ? real : model;
+    // Se prueban varias formas de ubicar el LCD y gana la que LEE mejor (más valores con forma
+    // de temperatura/humedad y más confianza):
+    //   1. separadores del HTC-2 · 2. rectángulo claro dentro del marco oscuro del equipo ·
+    //   3. «el recuadro ya es la pantalla» (medidas estándar) · 4. ajuste del modelo de tinta.
+    if (opts.noAngle || opts.modelOnly) return snapModel(frame, quad, base, opts);
+    var cands = [], rank = function (c) { var ok = plausibleHtc2(frame, c); return ok * 1000 + c.meanConf; };
+    var add = function (c) { if (c) { c.rank = rank(c); cands.push(c); } return c; };
+    var real = add(locateHtc2(frame, quad, base, opts));
+    if (real && real.rank >= 3080) return real;
+    lcdInFrame(frame, quad).slice(0, 2).forEach(function (q) { add(standardFit(frame, q, base, opts, "marco")); });
+    // «ya es la pantalla» solo si el recuadro tiene la proporción del LCD (≈ 1,36 de ancho por alto);
+    // un recuadro del equipo completo es casi cuadrado y daría lecturas falsas con forma válida
+    var qw = (Math.hypot(quad[1].x - quad[0].x, quad[1].y - quad[0].y) + Math.hypot(quad[2].x - quad[3].x, quad[2].y - quad[3].y)) / 2;
+    var qh = (Math.hypot(quad[3].x - quad[0].x, quad[3].y - quad[0].y) + Math.hypot(quad[2].x - quad[1].x, quad[2].y - quad[1].y)) / 2;
+    var asp = qw / Math.max(1, qh);
+    if (asp > HTC2_ASPECT * 0.85 && asp < HTC2_ASPECT * 1.2) add(standardFit(frame, quad, base, opts, "estándar"));
+    if (!cands.some(function (c) { return c.rank >= 3000; })) {
+      var mdl = add(snapModel(frame, quad, base, opts));
+      // el modelo da el LCD; sobre ese LCD también se prueban las medidas estándar (afinadas)
+      if (mdl) add(standardFit(frame, mdl.quad, base, opts, "modelo+estándar"));
+    }
+    cands.sort(function (a, b) { return b.rank - a.rank; });
+    return cands.length && cands[0].rank >= 2000 ? cands[0] : null;
+  }
+
+  /**
+   * Calibrar CON EL EJEMPLO: la persona escribe lo que muestra el sensor (p. ej. tempIn
+   * "25.5") y se ajustan los cuadros y la inclinación hasta leer exactamente eso.
+   * expected: { key: texto } (solo los que se escribieron). La inclinación es común a todos.
+   * @returns { fields, slantDeg, result: { key: { text, confidence, ok } } }
+   */
+  function fitToExample(frame, quad, fields, expected, opts) {
+    opts = opts || {};
+    var lcd = prepareLcd(frame, quad, 480), img = lcd.img, W = img.w, H = img.h;
+    var keys = Object.keys(expected).filter(function (k) { return fields[k] && expected[k] != null && String(expected[k]).trim() !== ""; });
+    var norm = function (t) { return String(t).replace(/\s/g, ""); };
+    var read = function (f, k, slant) {
+      return decodeField(img, { x: f.x * W, y: f.y * H, w: f.w * W, h: f.h * H }, { digits: f.digits, decimals: f.decimals, slantDeg: slant, lightSegments: opts.lightSegments, format: k === "time" ? "time" : "number" });
+    };
+    // puntaje: coincidencia exacta >> caracteres acertados (alineados a la derecha) >> confianza
+    var match = function (k, r) {
+      var want = norm(expected[k]), got = norm(r.text);
+      if (got === want) return 1000 + r.confidence;
+      var hit = 0;
+      for (var i = 1; i <= Math.min(want.length, got.length); i++) if (want[want.length - i] === got[got.length - i]) hit++;
+      return hit * 100 + r.confidence * 0.1;
+    };
+    var fit = function (k, fStart, slant, grid) {
+      // 1) búsqueda gruesa en cuadrícula (el punto de partida puede estar bastante corrido)
+      var f0 = fStart, g0 = null;
+      (grid ? [0.88, 1, 1.12] : []).forEach(function (sc) {
+        for (var dy = -0.4; dy <= 0.401; dy += 0.08) for (var dx = -0.4; dx <= 0.401; dx += 0.08) {
+          var t = { w: fStart.w * sc, h: fStart.h * sc, digits: fStart.digits, decimals: fStart.decimals };
+          t.x = fStart.x + fStart.w * (1 - sc) / 2 + dx * fStart.w; t.y = fStart.y + fStart.h * (1 - sc) / 2 + dy * fStart.h;
+          if (t.x < 0 || t.y < 0 || t.x + t.w > 1 || t.y + t.h > 1) continue;
+          var v = match(k, read(t, k, slant));
+          if (!g0 || v > g0.v) g0 = { v: v, t: t };
+        }
+      });
+      if (g0) f0 = g0.t;
+      // 2) afinado local
+      var cur = { x: f0.x, y: f0.y, w: f0.w, h: f0.h, digits: f0.digits, decimals: f0.decimals }, best = match(k, read(cur, k, slant)), cell = f0.w / f0.digits;
+      var steps = [
+        function (f, d) { f.x += d * cell * 0.06; },
+        function (f, d) { var r = f.x + f.w; f.w *= 1 + d * 0.035; f.x = r - f.w; },
+        function (f, d) { f.y += d * f0.h * 0.035; },
+        function (f, d) { var c = f.y + f.h / 2; f.h *= 1 + d * 0.035; f.y = c - f.h / 2; },
+      ];
+      for (var pass = 0; pass < 4; pass++) {
+        var moved = false;
+        steps.forEach(function (st) {
+          for (var dir = -1; dir <= 1; dir += 2) {
+            for (var n = 0; n < 8; n++) {
+              var t = { x: cur.x, y: cur.y, w: cur.w, h: cur.h, digits: cur.digits, decimals: cur.decimals };
+              st(t, dir);
+              if (t.x < 0 || t.y < 0 || t.x + t.w > 1 || t.y + t.h > 1 || Math.abs(t.x - f0.x) > 0.45 * f0.w || Math.abs(t.y - f0.y) > 0.45 * f0.h || t.w / f0.w > 1.45 || t.w / f0.w < 0.7 || t.h / f0.h > 1.45 || t.h / f0.h < 0.7) break;
+              var v = match(k, read(t, k, slant));
+              if (v > best + 0.5) { best = v; cur = t; moved = true; } else break;
+            }
+          }
+        });
+        if (!moved) break;
+      }
+      return { f: cur, score: best };
+    };
+    var bestAll = null;
+    [6, 0, 3, 9, 12].forEach(function (slant) {
+      var tot = 0, fs = {};
+      keys.forEach(function (k) { var r = fit(k, bestAll ? bestAll.fs[k] : fields[k], slant, !bestAll); fs[k] = r.f; tot += r.score; });
+      if (!bestAll || tot > bestAll.tot) bestAll = { tot: tot, slant: slant, fs: fs };
+    });
+    var out = JSON.parse(JSON.stringify(fields)), result = {};
+    keys.forEach(function (k) {
+      var f = bestAll.fs[k];
+      out[k].x = f.x; out[k].y = f.y; out[k].w = f.w; out[k].h = f.h; out[k].enabled = true;
+      var r = read(out[k], k, bestAll.slant);
+      result[k] = { text: r.text, confidence: r.confidence, ok: norm(r.text) === norm(expected[k]) };
+    });
+    return { fields: out, slantDeg: bestAll.slant, result: result };
+  }
+
+  /** LCD claro rodeado del marco oscuro del HTC-2, buscado DENTRO de un cuadrilátero (px del frame). */
+  function lcdInFrame(frame, quad) {
+    var l = prepareLcd(frame, quad, 480);
+    return detectLcdHoles(l.img, { workWidth: 480, minFrac: 0.25, maxFrac: 0.98, radius: 40 }).map(function (h) {
+      return refineEdges(frame, h.quad.map(function (p) { return rectPointToFrame(quad, l.size, p.x, p.y); }));
+    }).filter(function (q) { return q.every(function (p) { return p && isFinite(p.x); }); });
+  }
+
+  /**
+   * Medidas ESTÁNDAR del HTC-2 sobre un LCD ya encuadrado: los campos van en su lugar de
+   * fábrica; se busca la inclinación de los dígitos y cada cuadro se afina por la lectura.
+   */
+  function standardFit(frame, lcdQuad, base, opts, method) {
+    var lcd = prepareLcd(frame, lcdQuad, 480), img = lcd.img, W = img.w, H = img.h;
+    var fields = JSON.parse(JSON.stringify(base));
+    Object.keys(fields).forEach(function (k) { var m = HTC2_FIELDS_DEFAULT[k]; if (m) { fields[k].x = m.x; fields[k].y = m.y; fields[k].w = m.w; fields[k].h = m.h; } });
+    var num = /^-?\d{2}\.\d$/, best = 0, slant = 6;
+    [0, 3, 6, 9, 12].forEach(function (sl) {
+      var sc = 0;
+      ["tempIn", "tempOut"].forEach(function (k) {
+        var f = fields[k];
+        if (!f) return;
+        var r = decodeField(img, { x: f.x * W, y: f.y * H, w: f.w * W, h: f.h * H }, { digits: f.digits, decimals: f.decimals, slantDeg: sl, lightSegments: opts.lightSegments });
+        sc += num.test(r.text) ? r.confidence : r.confidence * 0.3;
+      });
+      if (sc > best) { best = sc; slant = sl; }
+    });
+    var conf = {};
+    Object.keys(fields).forEach(function (k) {
+      if (!fields[k].enabled) return;
+      var r = refineField(img, fields[k], { slantDeg: slant, lightSegments: opts.lightSegments, format: k === "time" ? "time" : "number" });
+      fields[k] = r.field; conf[k] = r.confidence;
+    });
+    return { quad: lcdQuad, fields: fields, slantDeg: slant, confidence: conf, score: 0.3, method: method };
   }
 
   /**
@@ -1549,7 +1694,8 @@
       if (!f) return;
       var r = decodeField(lcd.img, { x: f.x * lcd.size.w, y: f.y * lcd.size.h, w: f.w * lcd.size.w, h: f.h * lcd.size.h }, { digits: f.digits, decimals: f.decimals, slantDeg: res.slantDeg != null ? res.slantDeg : 6 });
       var v = parseFloat(r.text);
-      var shapeOk = k === "humidity" ? /^\d{2}$/.test(r.text) && v >= 5 && v <= 99 : /^-?\d{2}\.\d$/.test(r.text) && v >= -20 && v <= 60;
+      // el HTC-2 no muestra ceros a la izquierda («00.0», «05»): eso es una lectura equivocada
+      var shapeOk = k === "humidity" ? /^[1-9]\d$/.test(r.text) && v >= 5 && v <= 99 : /^-?[1-9]\d\.\d$/.test(r.text) && v >= -20 && v <= 60;
       if (shapeOk && r.confidence >= 50) { ok++; sum += r.confidence; }
     });
     res.meanConf = ok ? sum / ok : 0;
@@ -1664,18 +1810,24 @@
     kept.forEach(function (c) {
       if (opts.need && out.length >= opts.need) return; // ya se encontraron las pantallas buscadas
       // ventana holgada alrededor del candidato, girada según las filas de dígitos → encaje fino
-      var g = 0.25, ang = rowAngle(ink, W, c.x, c.y, c.x + c.w, c.y + c.h), cs = Math.cos(ang), sn0 = Math.sin(ang);
-      var ccx = (c.x + c.w / 2) * f, ccy = (c.y + c.h / 2) * f, hw = c.w * (0.5 + g) * f, hh = c.h * (0.5 + g) * f;
-      var q = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(function (p) { return { x: ccx + p[0] * cs - p[1] * sn0, y: ccy + p[0] * sn0 + p[1] * cs }; });
-      var sn = snapHtc2(frame, q, base, Object.assign({}, opts, { hint: { x: g / (1 + 2 * g), y: g / (1 + 2 * g), w: 1 / (1 + 2 * g), h: 1 / (1 + 2 * g) } }));
-      if (!sn || sn.score < 0.22) return;
+      // (si no lee los tres valores, se reintenta con una ventana más grande)
+      var ang = rowAngle(ink, W, c.x, c.y, c.x + c.w, c.y + c.h), cs = Math.cos(ang), sn0 = Math.sin(ang), sn = null;
+      [0.25, 0.5].some(function (g) {
+        var ccx = (c.x + c.w / 2) * f, ccy = (c.y + c.h / 2) * f, hw = c.w * (0.5 + g) * f, hh = c.h * (0.5 + g) * f;
+        var q = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(function (p) { return { x: ccx + p[0] * cs - p[1] * sn0, y: ccy + p[0] * sn0 + p[1] * cs }; });
+        // 1.er intento con pista (rápido); el 2.º, sin pista: búsqueda completa en la ventana grande
+        var r = snapHtc2(frame, q, base, g < 0.4 ? Object.assign({}, opts, { hint: { x: g / (1 + 2 * g), y: g / (1 + 2 * g), w: 1 / (1 + 2 * g), h: 1 / (1 + 2 * g) } }) : opts);
+        if (r && (!sn || (r.rank || 0) > (sn.rank || 0))) sn = r;
+        return sn && (sn.rank || 0) >= 3000;
+      });
+      if (!sn || (sn.rank || 0) < 2000) return; // no lee al menos dos valores con forma válida
       // validación: el HTC-2 muestra temperaturas y humedad con forma de número
       var lcd = prepareLcd(frame, sn.quad, 480), ok = 0, confSum = 0;
       ["tempIn", "tempOut", "humidity"].forEach(function (k) {
         var fl = sn.fields[k];
         if (!fl) return;
         var r = decodeField(lcd.img, { x: fl.x * lcd.size.w, y: fl.y * lcd.size.h, w: fl.w * lcd.size.w, h: fl.h * lcd.size.h }, { digits: fl.digits, decimals: fl.decimals, slantDeg: sn.slantDeg != null ? sn.slantDeg : opts.slantDeg, lightSegments: opts.lightSegments });
-        var v = parseFloat(r.text), plausible = /^-?\d+(\.\d)?$/.test(r.text) && (k === "humidity" ? v >= 5 && v <= 99 : v >= -20 && v <= 60);
+        var v = parseFloat(r.text), plausible = (k === "humidity" ? /^[1-9]\d$/.test(r.text) && v >= 5 && v <= 99 : /^-?([1-9]\d|\d)\.\d$/.test(r.text) && !/^-?0\d/.test(r.text) && v >= -20 && v <= 60);
         if (plausible && r.confidence >= 30) { ok++; confSum += r.confidence; }
       });
       if (ok < 3) return; // las tres lecturas deben ser plausibles: si no, no es un HTC-2
@@ -1849,6 +2001,10 @@
       var app = s.tpl && s.tpl.app;
       if (!app) { out[s.id] = { quad: null, score: 0, how: "sin plantilla" }; return; }
       var best = null;
+      // Los sensores son IDÉNTICOS: un sensor nunca puede tomar la pantalla donde está otro
+      // (si no, A «se queda» con la de B y B aparece no encontrado).
+      var others = sensors.filter(function (o) { return o !== s && o.last; }).map(function (o) { return expandQuad(o.last, 1.1); });
+      var mine = function (c) { return !others.some(function (q) { return pointInQuad(q, c); }); };
       // 0. ¿Sigue donde estaba? (lo normal: el equipo no se mueve). Si se parece mucho a la
       //    plantilla se queda; si se parece algo, además debe tener dígitos donde la
       //    calibración dice. Así un sensor aceptado no aparece «no encontrado» sin moverse.
@@ -1863,7 +2019,7 @@
       var consider = function (q, how) {
         if (!q) return;
         var c = quadCenter(q);
-        if (taken.some(function (t) { return pointInQuad(t, c); })) return; // ya es de otro sensor
+        if (taken.some(function (t) { return pointInQuad(t, c); }) || !mine(c)) return; // ya es de otro sensor
         // solo se acepta un lugar donde hay una pantalla con dígitos (no una camisa o una caja)
         if (s.fields && screenScore(frame, q, s.fields, opts) < minDigits) return;
         var v = ncc(appearance(frame, q), app);
@@ -1912,6 +2068,17 @@
   function renderField(img, roi, text, opts) {
     var digits = opts.digits, tanSlant = Math.tan(((opts.slantDeg || 0) * Math.PI) / 180), ink = opts.ink == null ? 40 : opts.ink;
     var raw = String(text);
+    // hora como en el HTC-2: horas (0–44 %) · dos puntos · minutos (56–100 %)
+    if (digits === 4 && raw.indexOf(":") >= 0 && !opts._part) {
+      var hm = raw.split(":"), sub = function (t, x0) { renderField(img, { x: roi.x + roi.w * x0, y: roi.y, w: roi.w * 0.44, h: roi.h }, t, Object.assign({}, opts, { digits: 2, _part: true })); };
+      sub(hm[0], 0); sub(hm[1], 0.56);
+      var kw = Math.max(2, roi.w * 0.03), kx = roi.x + roi.w * 0.5;
+      [0.3, 0.7].forEach(function (vv) {
+        for (var y3 = Math.floor(roi.y + roi.h * (vv - 0.05)); y3 < roi.y + roi.h * (vv + 0.05); y3++)
+          for (var x3 = Math.floor(kx - kw / 2); x3 < kx + kw / 2; x3++) if (x3 >= 0 && y3 >= 0 && x3 < img.w && y3 < img.h) img.d[y3 * img.w + x3] = ink;
+      });
+      return;
+    }
     var dotIdx = raw.indexOf("."), colon = raw.indexOf(":") >= 0;
     var chars = raw.replace(/[.:]/g, "").split("");
     while (chars.length < digits) chars.unshift(" ");
@@ -2082,6 +2249,7 @@
     refineField: refineField,
     snapHtc2: snapHtc2,
     plausibleHtc2: plausibleHtc2,
+    fitToExample: fitToExample,
     locateHtc2: locateHtc2,
     findHtc2Lcd: findHtc2Lcd,
     detectHtc2: detectHtc2,

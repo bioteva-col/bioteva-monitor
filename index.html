@@ -27,6 +27,7 @@
       <button class="btn" id="nowBtn" type="button">Leer ahora</button>
       <button class="btn" id="xlsxBtn" type="button" title="Exporta los últimos 30 días">⤓ Exportar Excel</button>
       <button class="btn" id="installBtn" type="button" hidden>⊕ Instalar app</button>
+      <a class="btn ghost" href="#ayuda" id="helpBtn" title="Cómo usar la app">❓ Ayuda</a>
       <button class="icon-btn" id="themeBtn" type="button" title="Cambiar tema" aria-label="Cambiar tema">◐</button>
     </div>
   </div>
@@ -42,6 +43,7 @@
       <button class="tab" role="tab" data-view="alertas" aria-selected="false">Alertas <span class="count" id="alertCount">0</span></button>
       <button class="tab" role="tab" data-view="reportes" aria-selected="false">Reportes</button>
       <button class="tab" role="tab" data-view="configuracion" aria-selected="false">Configuración</button>
+      <button class="tab help-tab" role="tab" data-view="ayuda" aria-selected="false">❓ Cómo usar</button>
     </nav>
   </div>
 </header>
@@ -144,6 +146,17 @@
           <div class="col">
             <div class="canvas-box"><canvas id="calCanvas" width="1280" height="720" tabindex="0" aria-label="Imagen de la cámara: arrastra para marcar el sensor"></canvas></div>
             <div class="cal-read" id="calRead" aria-live="polite"></div>
+            <div class="cal-example">
+              <p><b>¿Lo que lee la app no es lo que muestra el sensor?</b> Escribe aquí lo que ves en la pantalla del sensor y pulsa <b>Ajustar a estos valores</b>: la app mueve sola los cuadros hasta leer exactamente eso.</p>
+              <div class="ex-grid">
+                <label class="f"><span>Temp. IN</span><input id="exIn" inputmode="decimal" placeholder="25.5" autocomplete="off" /></label>
+                <label class="f"><span>Temp. OUT</span><input id="exOut" inputmode="decimal" placeholder="22.3" autocomplete="off" /></label>
+                <label class="f"><span>Humedad</span><input id="exHum" inputmode="numeric" placeholder="42" autocomplete="off" /></label>
+                <label class="f"><span>Hora</span><input id="exTime" placeholder="12:41" autocomplete="off" /></label>
+              </div>
+              <button class="btn" id="exFit" type="button">🎯 Ajustar a estos valores</button>
+              <span class="msg" id="exMsg" role="status"></span>
+            </div>
             <div class="row-actions">
               <button class="btn" type="button" data-cal="snap">🎯 Ajustar de nuevo a la pantalla</button>
             </div>
@@ -191,6 +204,116 @@
   <section data-view="alertas" class="col" hidden></section>
   <section data-view="reportes" class="col" hidden></section>
   <section data-view="configuracion" class="col" hidden></section>
+
+  <!-- ───────────── CÓMO USAR (guía sencilla) ───────────── -->
+  <section data-view="ayuda" class="col guide" hidden>
+    <div class="panel">
+      <header><h2>¿Cómo se usa BioTeva Monitor?</h2></header>
+      <div class="panel-body col">
+        <p class="guide-lead">Esta app mira con la cámara los dos termómetros de las cajas de grillos, <b>lee sus números sola</b>, los guarda y te avisa si algo anda mal. Sigue los pasos en orden. Cada paso es corto.</p>
+
+        <ol class="guide-steps">
+          <li>
+            <span class="g-ico" aria-hidden="true">📷</span>
+            <div><h3>1. Pon la cámara</h3>
+              <p>Pon la cámara <b>quieta</b>, mirando de frente a los dos sensores.</p>
+              <p>Que haya <b>buena luz</b> y que los números del sensor se vean <b>grandes</b> en la imagen (más cerca = mejor).</p>
+              <p>No la muevas después. Si la mueves, repite el paso 3.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">🔌</span>
+            <div><h3>2. Prende la cámara</h3>
+              <p>Ve a <b>Cámara</b> y toca <b>Activar cámara</b>.</p>
+              <p>Si Chrome pregunta, toca <b>Permitir</b>.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">🎯</span>
+            <div><h3>3. Enséñale dónde está cada sensor</h3>
+              <p>Ve a <b>Calibración</b>. Arriba dice qué sensor toca ahora (primero el <b>A</b>).</p>
+              <p>Con el dedo o el mouse, <b>dibuja un rectángulo sobre la pantalla gris</b> del sensor (la parte con números). Si te queda un poco grande, no pasa nada.</p>
+              <p>Abajo aparecen <b>los números que la app está leyendo</b>, en grande. Míralos y compáralos con el sensor:</p>
+              <ul>
+                <li>✅ <b>Son iguales</b> → toca <b>✓ Aceptar ubicación</b>. La app pasa sola al sensor B.</li>
+                <li>✏️ <b>No son iguales</b> → escribe en las casillas los números que <b>tú ves</b> en el sensor y toca <b>🎯 Ajustar a estos valores</b>. La app mueve sus cuadritos hasta leer lo mismo. Luego toca <b>✓ Aceptar ubicación</b>.</li>
+              </ul>
+              <p>Haz lo mismo con el <b>sensor B</b>. Cuando los dos digan <b>✓ ubicado</b>, listo.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">⏱️</span>
+            <div><h3>4. Elige cada cuánto lee</h3>
+              <p>Ve a <b>Configuración</b> → <b>Leer cada</b> y elige, por ejemplo, <b>10 minutos</b>.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">▶️</span>
+            <div><h3>5. Empieza</h3>
+              <p>Toca <b>▶ Iniciar monitoreo</b> (arriba). Arriba verás <b>MONITOREO EN CURSO</b>.</p>
+              <p><b>Deja la ventana abierta</b> y el computador prendido (sin suspender). Si la cierras, deja de leer.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">👀</span>
+            <div><h3>6. Mira cómo están tus cajas</h3>
+              <p>En <b>Dashboard</b> ves cada sensor con su color:</p>
+              <ul>
+                <li><span class="dot good"></span> <b>Verde</b>: todo normal.</li>
+                <li><span class="dot warn"></span> <b>Amarillo</b>: atención, revisa pronto.</li>
+                <li><span class="dot crit"></span> <b>Rojo</b>: hay un problema, revisa ya.</li>
+                <li><span class="dot muted"></span> <b>Gris</b>: no hay lecturas (cámara apagada, ventana cerrada o sensor tapado).</li>
+              </ul>
+</div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">🔔</span>
+            <div><h3>7. Si aparece una alerta</h3>
+              <ul>
+                <li><b>Fuera de rango</b>: la temperatura o la humedad pasó los límites que tú pusiste en <b>Sensores</b>. Revisa la lámpara, la ventilación y el agua.</li>
+                <li><b>Cambio brusco</b>: subió o bajó mucho en poco tiempo. Revisa si se abrió la caja, si se apagó o prendió la lámpara.</li>
+                <li><b>Sin datos</b>: la app no pudo leer por un rato. Revisa la cámara y que la ventana siga abierta. (La app <b>no sabe</b> si fue un corte de luz: solo dice que no hubo lecturas.)</li>
+                <li><b>Sensor no detectado / lectura dudosa</b>: algo tapa el sensor, cambió la luz o se movió la cámara. Repite el paso 3.</li>
+                <li><b>Seguridad térmica</b> (si usas lámparas): la caja llegó a la temperatura de seguridad y la lámpara se apagó sola. Revisa la caja antes de volver a prenderla.</li>
+              </ul>
+              <p>Cuando ya lo revisaste, en <b>Alertas</b> toca <b>Reconocer</b>.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">📊</span>
+            <div><h3>8. Gráficas y reportes</h3>
+              <p><b>Gráficas</b>: la línea es la temperatura o la humedad; la franja de color son tus límites. Si la línea sale de la franja, hubo un problema.</p>
+              <p><b>Reportes</b> → <b>¿Hubo cambios importantes?</b> te lo explica en palabras.</p>
+              <p><b>⤓ Exportar Excel</b> guarda todo en un archivo para compartir.</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">🔥</span>
+            <div><h3>9. Lámparas (solo si las usas)</h3>
+              <p>En <b>Control térmico</b> pon la dirección (IP) de cada enchufe TP-Link HS105 y toca <b>Probar</b>. En modo <b>AUTO</b> la app prende y apaga la lámpara sola según el perfil (huevos, ninfas o adultos).</p></div>
+          </li>
+          <li>
+            <span class="g-ico" aria-hidden="true">🔗</span>
+            <div><h3>10. Conectar con otros sistemas</h3>
+              <p><b>Reportes → Resumen para el panel</b>: descarga un archivo con los datos de las últimas 24 h (para la página de seguimiento u otro programa).</p>
+              <p><b>Exportar Excel</b> y <b>Configuración → Datos y respaldo</b>: todos los datos, para abrir en Excel, Google Sheets u otro sistema.</p>
+              <p>Si usas lámparas, el control térmico tiene una dirección local para otros programas del mismo computador: <code>http://127.0.0.1:4479/api/status</code> (estado de las cajas, en formato JSON).</p></div>
+          </li>
+        </ol>
+
+        <div class="panel guide-faq">
+          <header><h2>Si algo no funciona</h2></header>
+          <div class="panel-body">
+            <dl>
+              <dt>La app lee números raros (por ejemplo «LL.H» o «8?.7»)</dt>
+              <dd>En Calibración escribe los números que ves en el sensor y toca <b>Ajustar a estos valores</b>. Si sigue mal: acerca la cámara, quita reflejos de luz sobre la pantalla del sensor y dibuja el rectángulo solo sobre la parte gris.</dd>
+              <dt>Dice «sin imagen» o «cámara no activa»</dt>
+              <dd>Ve a Cámara → Activar cámara. Cierra otros programas que usen la cámara (Zoom, Meet, Teams).</dd>
+              <dt>Moví la cámara o los sensores</dt>
+              <dd>Repite el paso 3 con los dos sensores.</dd>
+              <dt>Dice «gateway no disponible» en Control térmico</dt>
+              <dd>Abre la app desde el ícono <b>BioTeva Monitor</b> del escritorio: así se enciende el control de lámparas.</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
 </main>
 
 <footer class="foot">

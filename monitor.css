@@ -301,7 +301,7 @@ input.num { width: 84px; }
 .accept-row { align-items: center; }
 .btn.big { font-size: 16px; padding: 10px 18px; }
 
-.cal-read { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.cal-read { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .cal-read .rv { border: 1px solid var(--line, #3a4434); border-radius: 10px; padding: 8px 10px; }
 .cal-read .rv .k { display: block; font-size: 12px; opacity: .75; }
 .cal-read .rv .v { font: 600 26px/1.15 ui-monospace, Consolas, monospace; }
@@ -310,3 +310,21 @@ input.num { width: 84px; }
 .cal-adv { border: 1px dashed var(--line, #3a4434); border-radius: 10px; padding: 8px 12px; }
 .cal-adv summary { cursor: pointer; font-weight: 600; }
 @media (max-width: 520px) { .cal-read { grid-template-columns: 1fr; } }
+
+.cal-example { border: 1px solid var(--line, #3a4434); border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; }
+.cal-example p { margin: 0; }
+.ex-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.ex-grid input { width: 100%; font: 600 18px ui-monospace, Consolas, monospace; }
+@media (max-width: 620px) { .ex-grid, .cal-read { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* guía «Cómo usar» */
+.guide-lead { font-size: 17px; line-height: 1.5; }
+.guide-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+.guide-steps > li { display: grid; grid-template-columns: 52px 1fr; gap: 12px; align-items: start; border: 1px solid var(--line, #3a4434); border-radius: 12px; padding: 12px 14px; }
+.guide-steps h3 { margin: 0 0 4px; font-size: 18px; }
+.guide-steps p, .guide-steps li li { font-size: 16px; line-height: 1.5; margin: 4px 0; }
+.g-ico { font-size: 34px; line-height: 1; text-align: center; }
+.guide .dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; vertical-align: -2px; }
+.guide .dot.good { background: #1baf7a; } .guide .dot.warn { background: #eda100; } .guide .dot.crit { background: #e34948; } .guide .dot.muted { background: #8a9086; }
+.guide-faq dt { font-weight: 700; margin-top: 10px; } .guide-faq dd { margin: 4px 0 0; line-height: 1.5; }
+.help-tab { font-weight: 700; }

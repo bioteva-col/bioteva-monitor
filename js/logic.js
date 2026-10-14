@@ -125,10 +125,11 @@
 
   function HTC2_FIELDS() {
     return {
-      tempIn: { x: 0.28, y: 0.0, w: 0.53, h: 0.3, digits: 3, decimals: 1, enabled: true },
-      tempOut: { x: 0.28, y: 0.34, w: 0.52, h: 0.28, digits: 3, decimals: 1, enabled: true },
-      humidity: { x: 0.55, y: 0.68, w: 0.32, h: 0.29, digits: 2, decimals: 0, enabled: true },
-      time: { x: 0.1, y: 0.71, w: 0.36, h: 0.24, digits: 4, decimals: 0, enabled: false },
+      // medido sobre la foto del fabricante y la cámara del usuario (oct-2026), fracciones del LCD
+      tempIn: { x: 0.275, y: 0.0, w: 0.505, h: 0.315, digits: 3, decimals: 1, enabled: true },
+      tempOut: { x: 0.275, y: 0.337, w: 0.505, h: 0.293, digits: 3, decimals: 1, enabled: true },
+      humidity: { x: 0.53, y: 0.655, w: 0.312, h: 0.31, digits: 2, decimals: 0, enabled: true },
+      time: { x: 0.095, y: 0.752, w: 0.385, h: 0.19, digits: 4, decimals: 0, enabled: true },
     };
   }
   /** Distribución que traían versiones anteriores (se migra a la del HTC-2). */
@@ -147,7 +148,7 @@
       lightSegments: false,
       reference: null,
       /** Seguimiento automático: plantilla de apariencia del equipo (se crea al ubicarlo). */
-      track: { enabled: true, tpl: null },
+      track: { enabled: false, tpl: null }, // cámara fija: apagado (se activa si los sensores se mueven)
       // Distribución del LCD del termohigrómetro HTC-2 (fracciones del LCD), medida sobre
       // imágenes reales: fila 1 = temperatura (IN), fila 2 = temperatura (OUT),
       // fila 3 = reloj (izq., pequeño) y humedad relativa (der.).

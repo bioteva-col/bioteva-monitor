@@ -315,7 +315,7 @@
 
   const normQuad = (q, w, h) => q.map((p) => ({ x: p.x / w, y: p.y / h }));
   const pxQuad = (q, w, h) => q.map((p) => ({ x: p.x * w, y: p.y * h }));
-  const isTracking = (s) => !!(s.calibration.track && s.calibration.track.enabled !== false);
+  const isTracking = (s) => !!(s.calibration.track && s.calibration.track.enabled === true);
 
   /** Fija un sensor sobre una pantalla (LCD, px): esquinas + plantilla para seguirla + referencia. */
   function lockSensorOn(sensor, gray, quadPxLcd, fields, slantDeg) {
@@ -323,7 +323,7 @@
     cal.quad = normQuad(quadPxLcd, gray.w, gray.h);
     if (fields) cal.fields = fields;
     if (slantDeg != null) cal.slantDeg = slantDeg;
-    cal.track = { enabled: cal.track ? cal.track.enabled !== false : true, tpl: Seg.makeTemplate(gray, quadPxLcd) };
+    cal.track = { enabled: !!(cal.track && cal.track.enabled === true), tpl: Seg.makeTemplate(gray, quadPxLcd) };
     const a = analyzeSensor(sensor, gray, cal, false);
     cal.reference = Seg.thumbToB64(a.thumb);
     App.prevThumbs[sensor.id] = null;
@@ -588,6 +588,7 @@
       case "alertas": return renderAlerts();
       case "reportes": return renderReports();
       case "configuracion": return renderSettings();
+      case "ayuda": return null; // guía estática (index.html)
     }
   }
 
@@ -859,7 +860,7 @@
     $("#calSlant").value = App.cal.draft.slantDeg;
     $("#calSlantOut").textContent = App.cal.draft.slantDeg + "°";
     $("#calLight").checked = !!App.cal.draft.lightSegments;
-    $("#calTrack").checked = !App.cal.draft.track || App.cal.draft.track.enabled !== false;
+    $("#calTrack").checked = !!(App.cal.draft.track && App.cal.draft.track.enabled);
     $("#calMsg").textContent = "";
     $("#calSave").textContent = "✓ Aceptar ubicación del " + s.name;
     renderCalFlow();
@@ -970,7 +971,7 @@
     });
     // lectura en grande: lo que la app está leyendo ahora con esta ubicación
     const cr = $("#calRead");
-    if (cr) cr.innerHTML = ["tempIn", "tempOut", "humidity"].map((k) => {
+    if (cr) cr.innerHTML = ["tempIn", "tempOut", "humidity", "time"].map((k) => {
       const d = a.details[k], c = d ? d.confidence : 0, cls = !d ? "" : c >= 70 ? "good" : c >= 40 ? "warn" : "crit";
       return '<div class="rv ' + cls + '"><span class="k">' + esc(L.FIELD_LABELS[k]) + '</span><span class="v">' + esc(d ? d.text || "—" : "—") + '</span><span class="c">' + (d ? "confianza " + L.num(c, 0) + " %" : "no se lee") + "</span></div>";
     }).join("");
@@ -1202,6 +1203,23 @@
         renderCalFlow();
         calMsg("✓ Ubicación de " + s.name + " aceptada (" + new Date().toLocaleTimeString("es-CO") + ").", "good");
       }
+    });
+    // Calibrar con el ejemplo: lo que la persona ve en el sensor
+    $("#exFit").addEventListener("click", async () => {
+      const fr = App.cal.lastFrame, d = App.cal.draft, msg = $("#exMsg");
+      if (!fr || !fr.gray) { msg.textContent = "No hay imagen de la cámara."; msg.className = "msg crit"; return; }
+      const want = { tempIn: $("#exIn").value.trim().replace(",", "."), tempOut: $("#exOut").value.trim().replace(",", "."), humidity: $("#exHum").value.trim(), time: $("#exTime").value.trim().replace(/^0(\d:)/, "$1") };
+      Object.keys(want).forEach((k) => { if (!want[k]) delete want[k]; });
+      if (!Object.keys(want).length) { msg.textContent = "Escribe al menos un valor de los que muestra el sensor."; msg.className = "msg warn"; return; }
+      msg.textContent = "Ajustando (unos segundos)…"; msg.className = "msg";
+      await new Promise((r) => setTimeout(r, 30));
+      const res = Seg.fitToExample(fr.gray, pxQuad(d.quad, fr.gray.w, fr.gray.h), d.fields, want, { lightSegments: d.lightSegments });
+      d.fields = res.fields; d.slantDeg = res.slantDeg;
+      $("#calSlant").value = res.slantDeg; $("#calSlantOut").textContent = res.slantDeg + "°";
+      drawCalibration(false);
+      const bad = Object.keys(res.result).filter((k) => !res.result[k].ok);
+      if (!bad.length) { msg.textContent = "✓ Ahora lee exactamente lo que escribiste. Pulsa «✓ Aceptar ubicación»."; msg.className = "msg good"; }
+      else { msg.textContent = "Casi: no logra leer " + bad.map((k) => L.FIELD_LABELS[k] + " (lee «" + (res.result[k].text || "nada") + "»)").join(", ") + ". Prueba encuadrar solo la pantalla del sensor, acercar la cámara o mejorar la luz."; msg.className = "msg warn"; }
     });
     $("#calShot").addEventListener("click", () => {
       const fr = App.cal.lastFrame;
@@ -1641,7 +1659,9 @@
       saved.cfgV = 2;
     }
     App.migrateOut = !!(saved && (saved.cfgV || 0) < 3);
-    if (saved) saved.cfgV = 3;
+    // v4: la cámara queda fija → el seguimiento automático pasa a estar apagado (se puede activar)
+    App.migrateTrack = !!(saved && (saved.cfgV || 0) < 4);
+    if (saved) saved.cfgV = 4;
     App.settings = L.validateSettings(saved || {}).value;
     const sensors = await App.store.getKV("sensors");
     if (Array.isArray(sensors) && sensors.length) {
@@ -1652,7 +1672,8 @@
         const merged = Object.assign(base, s);
         merged.calibration = Object.assign(L.defaultCalibration(id), s.calibration || {});
         merged.calibration.fields = Object.assign(L.defaultCalibration(id).fields, (s.calibration || {}).fields || {});
-        merged.calibration.track = Object.assign({ enabled: true, tpl: null }, (s.calibration || {}).track || {});
+        merged.calibration.track = Object.assign({ enabled: false, tpl: null }, (s.calibration || {}).track || {});
+        if (App.migrateTrack) merged.calibration.track.enabled = false;
         if (App.migrateOut && merged.controlTemp === "in") merged.controlTemp = "out"; // OUT = caja (sonda)
         // distribución antigua (genérica) → la real del HTC-2
         if (JSON.stringify(merged.calibration.fields) === L.OLD_FIELDS_JSON) {
