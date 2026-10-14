@@ -300,3 +300,13 @@ input.num { width: 84px; }
 .cal-flow .now { font-size: 15px; }
 .accept-row { align-items: center; }
 .btn.big { font-size: 16px; padding: 10px 18px; }
+
+.cal-read { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.cal-read .rv { border: 1px solid var(--line, #3a4434); border-radius: 10px; padding: 8px 10px; }
+.cal-read .rv .k { display: block; font-size: 12px; opacity: .75; }
+.cal-read .rv .v { font: 600 26px/1.15 ui-monospace, Consolas, monospace; }
+.cal-read .rv .c { font-size: 12px; }
+.cal-read .rv.good { border-color: #1baf7a; } .cal-read .rv.warn { border-color: #eda100; } .cal-read .rv.crit { border-color: #e34948; }
+.cal-adv { border: 1px dashed var(--line, #3a4434); border-radius: 10px; padding: 8px 12px; }
+.cal-adv summary { cursor: pointer; font-weight: 600; }
+@media (max-width: 520px) { .cal-read { grid-template-columns: 1fr; } }

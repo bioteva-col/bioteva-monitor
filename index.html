@@ -143,13 +143,9 @@
         <div class="cal-grid">
           <div class="col">
             <div class="canvas-box"><canvas id="calCanvas" width="1280" height="720" tabindex="0" aria-label="Imagen de la cámara: arrastra para marcar el sensor"></canvas></div>
+            <div class="cal-read" id="calRead" aria-live="polite"></div>
             <div class="row-actions">
-              <button class="btn" type="button" data-cal="rot-">↺ Rotar −1°</button>
-              <button class="btn" type="button" data-cal="rot+">↻ Rotar +1°</button>
-              <button class="btn" type="button" data-cal="scale-">− Escala 3 %</button>
-              <button class="btn" type="button" data-cal="scale+">+ Escala 3 %</button>
-              <button class="btn" type="button" data-cal="snap">🎯 Ajustar a la pantalla</button>
-              <button class="btn ghost" type="button" data-cal="reset">Restablecer</button>
+              <button class="btn" type="button" data-cal="snap">🎯 Ajustar de nuevo a la pantalla</button>
             </div>
             <div class="row-actions accept-row">
               <button class="btn primary big" id="calSave" type="button">✓ Aceptar ubicación del Sensor A</button>
@@ -159,6 +155,16 @@
           <div class="col">
             <h3 class="sub-h">Vista rectificada (perspectiva corregida)</h3>
             <div class="canvas-box rect"><canvas id="rectCanvas" width="480" height="386" aria-label="Pantalla rectificada: arrastra para marcar la región del valor seleccionado"></canvas></div>
+            <details class="cal-adv">
+            <summary>Ajustes avanzados (normalmente no hace falta: la app los calcula sola)</summary>
+            <div class="row-actions">
+              <button class="btn" type="button" data-cal="rot-">↺ Rotar −1°</button>
+              <button class="btn" type="button" data-cal="rot+">↻ Rotar +1°</button>
+              <button class="btn" type="button" data-cal="scale-">− Escala 3 %</button>
+              <button class="btn" type="button" data-cal="scale+">+ Escala 3 %</button>
+              <button class="btn ghost" type="button" data-cal="reset">Restablecer</button>
+            </div>
+            <p class="hint">Para corregir a mano un cuadro de lectura: elige el valor y dibuja su región en la vista rectificada.</p>
             <div class="seg small" role="radiogroup" aria-label="Región a dibujar" id="calFieldGroup">
               <label><input type="radio" name="calField" value="tempIn" checked /> <span>Temp. IN</span></label>
               <label><input type="radio" name="calField" value="tempOut" /> <span>Temp. OUT</span></label>
@@ -168,6 +174,7 @@
             <label class="f inline"><span>Inclinación de los dígitos</span><input type="range" id="calSlant" min="-20" max="20" step="1" /><output id="calSlantOut">0°</output></label>
             <label class="f inline"><input type="checkbox" id="calLight" /> <span>Segmentos claros sobre fondo oscuro (display retroiluminado)</span></label>
             <div class="table-scroll"><table class="compact" id="calFields"></table></div>
+            </details>
           </div>
         </div>
         <div class="row-actions">

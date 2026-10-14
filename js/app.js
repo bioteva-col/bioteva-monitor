@@ -318,10 +318,11 @@
   const isTracking = (s) => !!(s.calibration.track && s.calibration.track.enabled !== false);
 
   /** Fija un sensor sobre una pantalla (LCD, px): esquinas + plantilla para seguirla + referencia. */
-  function lockSensorOn(sensor, gray, quadPxLcd, fields) {
+  function lockSensorOn(sensor, gray, quadPxLcd, fields, slantDeg) {
     const cal = sensor.calibration;
     cal.quad = normQuad(quadPxLcd, gray.w, gray.h);
     if (fields) cal.fields = fields;
+    if (slantDeg != null) cal.slantDeg = slantDeg;
     cal.track = { enabled: cal.track ? cal.track.enabled !== false : true, tpl: Seg.makeTemplate(gray, quadPxLcd) };
     const a = analyzeSensor(sensor, gray, cal, false);
     cal.reference = Seg.thumbToB64(a.thumb);
@@ -342,7 +343,7 @@
       Seg.detectLcds(gray).forEach((c) => {
         if (found.some((f) => Seg.pointInQuad(f.quad, Seg.quadCenter(c.quad)))) return;
         const sn = Seg.snapHtc2(gray, c.quad.map((p, i, q) => { const cc = Seg.quadCenter(q); return { x: cc.x + (p.x - cc.x) * 1.15, y: cc.y + (p.y - cc.y) * 1.15 }; }), base, opts);
-        if (sn && sn.score >= 0.22) found.push({ quad: sn.quad, fields: sn.fields, area: Seg.quadArea(sn.quad), score: sn.score * 1000, kind: "marco" });
+        if (sn && sn.score >= 0.22) found.push({ quad: sn.quad, fields: sn.fields, slantDeg: sn.slantDeg, area: Seg.quadArea(sn.quad), score: sn.score * 1000, kind: "marco" });
       });
     }
     return found.slice(0, 6);
@@ -357,7 +358,7 @@
     const taken = sensors.filter((s) => !targets.includes(s)).map((s) => pxQuad(s.calibration.quad, gray.w, gray.h));
     const free = found.filter((f) => !taken.some((t) => Seg.pointInQuad(t, Seg.quadCenter(f.quad))));
     const pick = free.slice(0, targets.length).sort((a, b) => Seg.quadCenter(a.quad).x - Seg.quadCenter(b.quad).x);
-    targets.sort((a, b) => (a.id < b.id ? -1 : 1)).forEach((s, i) => { if (pick[i]) lockSensorOn(s, gray, pick[i].quad, pick[i].fields); });
+    targets.sort((a, b) => (a.id < b.id ? -1 : 1)).forEach((s, i) => { if (pick[i]) lockSensorOn(s, gray, pick[i].quad, pick[i].fields, pick[i].slantDeg); });
     return { found: found.length, assigned: Math.min(pick.length, targets.length) };
   }
 
@@ -431,8 +432,9 @@
           capture = analyzeSensor(sensor, fr.gray, null, true).capture;
           capture.cameraLabel = fr.label;
           const tk = App.track.state[sensor.id];
-          if (isTracking(sensor) && tk && !tk.ok) {
-            capture.referenceDiffScore = 100; // pantalla no encontrada → SENSOR NO DETECTADO
+          const readable = Object.keys(capture.fields).some((k) => capture.fields[k] && capture.fields[k].confidence >= 50);
+          if (isTracking(sensor) && tk && !tk.ok && !readable) {
+            capture.referenceDiffScore = 100; // pantalla no encontrada y nada legible → SENSOR NO DETECTADO
             capture.error = "La pantalla del sensor no se encontró en la imagen (seguimiento).";
           }
         }
@@ -851,7 +853,7 @@
 
   function openCalibration() {
     const s = sensorById(App.cal.sensorId);
-    if (!App.cal.draft || App.cal.draftFor !== s.id) { App.cal.draft = clone(s.calibration); App.cal.draftFor = s.id; }
+    if (!App.cal.draft || App.cal.draftFor !== s.id) { App.cal.draft = clone(s.calibration); App.cal.draftFor = s.id; App.cal.snapped = false; }
     $$('input[name="calSensor"]').forEach((r) => (r.checked = r.value === s.id));
     $$('input[name="calField"]').forEach((r) => (r.checked = r.value === App.cal.field));
     $("#calSlant").value = App.cal.draft.slantDeg;
@@ -888,7 +890,9 @@
     const fr = App.cal.lastFrame;
     if (!fr || fr.error) return false;
     const d = App.cal.draft, s = sensorById(App.cal.sensorId);
-    const sn = Seg.snapHtc2(fr.gray, quadPx, d.fields, { slantDeg: d.slantDeg, lightSegments: d.lightSegments });
+    let sn = Seg.snapHtc2(fr.gray, quadPx, d.fields, { slantDeg: d.slantDeg, lightSegments: d.lightSegments });
+    // solo vale si lo que lee tiene forma de temperatura y humedad (no se inventan lecturas)
+    if (sn && Seg.plausibleHtc2(fr.gray, sn) < 2) sn = null;
     if (!sn) {
       d.quad = normQuad(quadPx, fr.gray.w, fr.gray.h);
       drawCalibration(false);
@@ -897,6 +901,8 @@
     }
     d.quad = normQuad(sn.quad, fr.gray.w, fr.gray.h);
     d.fields = sn.fields;
+    App.cal.snapped = true;
+    if (sn.slantDeg != null) { d.slantDeg = sn.slantDeg; $("#calSlant").value = sn.slantDeg; $("#calSlantOut").textContent = sn.slantDeg + "°"; }
     drawCalibration(false);
     const r = App.cal.lastRect, txt = r ? ["tempIn", "tempOut", "humidity"].map((k) => r.details[k] ? L.FIELD_LABELS[k] + " " + (r.details[k].text || "∅") : null).filter(Boolean).join(" · ") : "";
     calMsg("Pantalla de " + s.name + " ajustada: " + txt + ". Si coincide con lo que muestra el sensor, pulsa «✓ Aceptar ubicación».", "good");
@@ -962,6 +968,12 @@
       ctx.fillStyle = sel ? "#e34948" : "#138a60";
       ctx.fillText(L.FIELD_LABELS[k] + (f.enabled ? "" : " (off)"), x + 2, Math.max(12, y - 3));
     });
+    // lectura en grande: lo que la app está leyendo ahora con esta ubicación
+    const cr = $("#calRead");
+    if (cr) cr.innerHTML = ["tempIn", "tempOut", "humidity"].map((k) => {
+      const d = a.details[k], c = d ? d.confidence : 0, cls = !d ? "" : c >= 70 ? "good" : c >= 40 ? "warn" : "crit";
+      return '<div class="rv ' + cls + '"><span class="k">' + esc(L.FIELD_LABELS[k]) + '</span><span class="v">' + esc(d ? d.text || "—" : "—") + '</span><span class="c">' + (d ? "confianza " + L.num(c, 0) + " %" : "no se lee") + "</span></div>";
+    }).join("");
     if (!tbody.querySelector("[data-read]")) buildCalTable();
     L.FIELD_KEYS.forEach((k) => {
       const d = a.details[k];
@@ -1002,13 +1014,22 @@
     const other = App.sensors.find((o) => o.id !== App.cal.sensorId && o.calibration.accepted);
     const oq = other ? pxQuad(other.calibration.quad, W, H) : null;
     const lw = oq ? Math.hypot(oq[1].x - oq[0].x, oq[1].y - oq[0].y) : W * 0.16;
-    const tries = [1.7, 2.4];
-    for (const k of tries) {
-      const hw = (lw * k) / 2, hh = (lw * k * 0.8) / 2;
-      const q = [{ x: x - hw, y: y - hh }, { x: x + hw, y: y - hh }, { x: x + hw, y: y + hh }, { x: x - hw, y: y + hh }];
+    // varias ventanas alrededor del clic: gana la que lee más valores plausibles (y con más confianza)
+    let best = null;
+    // (también corridas arriba/abajo: el clic rara vez cae justo en el centro del LCD); para
+    // en cuanto una lee los tres valores
+    const tries = [];
+    [0, -0.15, 0.15].forEach((dy) => [1.3, 1.6, 2.0].forEach((k) => tries.push([k, dy])));
+    for (const [k, dy] of tries) {
+      if (best && best.sc >= 3000) break;
+      const hw = (lw * k) / 2, hh = (lw * k * 0.85) / 2, cy = y + dy * 2 * hh;
+      const q = [{ x: x - hw, y: cy - hh }, { x: x + hw, y: cy - hh }, { x: x + hw, y: cy + hh }, { x: x - hw, y: cy + hh }];
       const sn = Seg.snapHtc2(fr.gray, q, App.cal.draft.fields, { slantDeg: App.cal.draft.slantDeg, lightSegments: App.cal.draft.lightSegments });
-      if (sn && Seg.pointInQuad(sn.quad, { x, y })) return snapDraft(q);
+      if (!sn || !Seg.pointInQuad(sn.quad, { x, y })) continue;
+      const ok = Seg.plausibleHtc2(fr.gray, sn), sc = ok * 1000 + sn.meanConf;
+      if (ok >= 2 && (!best || sc > best.sc)) best = { sc, q };
     }
+    if (best) return snapDraft(best.q);
     const inner = Seg.fitLcdAt(fr.gray, { x, y });
     if (inner) return snapDraft(inner.map((p, i, qq) => { const c = Seg.quadCenter(qq); return { x: c.x + (p.x - c.x) * 1.2, y: c.y + (p.y - c.y) * 1.3 }; }));
     calMsg("No se reconoció una pantalla en ese punto. Haz clic en el centro de la pantalla del sensor, o arrastra un rectángulo alrededor de ella.", "crit");
@@ -1073,7 +1094,9 @@
       const q = App.cal.draft.quad.map((o) => ({ x: o.x * W, y: o.y * H }));
       const hitR = 16 * p.scale;
       const corner = q.findIndex((c) => Math.hypot(c.x - p.x, c.y - p.y) < hitR);
-      const inside = corner < 0 && Seg.pointInQuad(q, p);
+      // mover el recuadro solo si ya está ubicado; si no, arrastrar dibuja uno nuevo
+      const placed = App.cal.snapped || sensorById(App.cal.sensorId).calibration.accepted;
+      const inside = placed && corner < 0 && Seg.pointInQuad(q, p);
       App.cal.drag = corner >= 0 ? { mode: "corner", i: corner } : inside ? { mode: "move", x0: p.x, y0: p.y, q0: App.cal.draft.quad.map((o) => ({ x: o.x, y: o.y })) } : { mode: "rect", x0: p.x, y0: p.y };
       canvas.setPointerCapture(ev.pointerId);
     });

@@ -1246,11 +1246,16 @@
     var W = img.w, H = img.h;
     // el campo solo puede mostrar un número (o la hora): una lectura con otra forma vale la mitad
     var shape = opts.format === "time" ? /^\d{1,2}:\d{2}$/ : /^-?\d+(\.\d+)?$/;
+    var digitsOf = function (t) { return (t.match(/\d/g) || []).length; };
+    var minDigits = 0; // no se «mejora» la confianza perdiendo dígitos que ya se leían
     var dec = function (f) {
       var r = decodeField(img, { x: f.x * W, y: f.y * H, w: f.w * W, h: f.h * H }, { digits: f.digits, decimals: f.decimals, slantDeg: opts.slantDeg, lightSegments: opts.lightSegments, format: opts.format });
-      return shape.test(r.text) ? r.confidence : r.confidence * 0.5;
+      var c = shape.test(r.text) ? r.confidence : r.confidence * 0.5;
+      return digitsOf(r.text) < minDigits ? c * 0.5 : c;
     };
     var cur = { x: field.x, y: field.y, w: field.w, h: field.h, digits: field.digits, decimals: field.decimals };
+    var first = decodeField(img, { x: cur.x * W, y: cur.y * H, w: cur.w * W, h: cur.h * H }, { digits: cur.digits, decimals: cur.decimals, slantDeg: opts.slantDeg, lightSegments: opts.lightSegments, format: opts.format });
+    if (shape.test(first.text) && first.confidence >= 40) minDigits = digitsOf(first.text);
     var bestC = dec(cur), cell = field.w / field.digits;
     var steps = [
       function (f, k) { f.x += k * cell * 0.08; },
@@ -1288,6 +1293,232 @@
     return [applyH(hm, r.x, r.y), applyH(hm, r.x + r.w, r.y), applyH(hm, r.x + r.w, r.y + r.h), applyH(hm, r.x, r.y + r.h)];
   }
 
+  // ─────────────── estructura real del HTC-2: separadores → LCD → dígitos ───────────────
+  //
+  // Medido sobre la cámara del usuario (oct-2026): el LCD del HTC-2 tiene dos LÍNEAS
+  // SEPARADORAS finas y oscuras de lado a lado (entre temp. IN / temp. OUT / hora+humedad).
+  // Son lo más fácil de encontrar de la pantalla y dan su posición, su tamaño y su
+  // inclinación. Con el LCD ya derecho, cada cuadro de lectura se coloca sobre sus
+  // dígitos y se elige el que mejor se lee.
+
+  /** Líneas finas oscuras casi horizontales (±6°) que cruzan la imagen: separadores y bordes del LCD. */
+  function hLines(img) {
+    var W = img.w, H = img.h, res = [], step = Math.max(1, Math.round(W / 140));
+    var off = Math.max(3, Math.round(H / 110)), off2 = off + Math.max(1, Math.round(H / 300));
+    var coverAt = function (y, sl) {
+      var hits = 0, n = 0;
+      for (var x = W * 0.08; x < W * 0.92; x += step) {
+        var yy = y + sl * (x - W / 2), c = sample(img, x, yy);
+        var up = Math.max(sample(img, x, yy - off), sample(img, x, yy - off2)), dn = Math.max(sample(img, x, yy + off), sample(img, x, yy + off2));
+        n++; if (Math.min(up, dn) - c > 12) hits++;
+      }
+      return hits / n;
+    };
+    // pasada gruesa (cada 2 px, cada 2°) y afinado solo donde hay una línea
+    for (var y = 2; y < H - 2; y += 2) {
+      var best = null;
+      for (var a = -6; a <= 6; a += 2) { var c1 = coverAt(y, Math.tan((a * Math.PI) / 180)); if (!best || c1 > best.cover) best = { y: y, a: a, cover: c1 }; }
+      if (best.cover >= 0.25) {
+        for (var dy = -1; dy <= 1; dy++) for (var da = -1.5; da <= 1.5; da += 0.5) {
+          var c2 = coverAt(y + dy, Math.tan(((best.a + da) * Math.PI) / 180));
+          if (c2 > best.cover) best = { y: y + dy, a: best.a + da, cover: c2 };
+        }
+      }
+      best.slope = Math.tan((best.a * Math.PI) / 180);
+      res.push(best);
+    }
+    var out = [];
+    res.sort(function (p, q) { return q.cover - p.cover; }).forEach(function (r) {
+      if (r.cover < 0.45 || out.some(function (o) { return Math.abs(o.y - r.y) < H * 0.05; })) return;
+      out.push(r);
+    });
+    return out.sort(function (p, q) { return p.y - q.y; });
+  }
+
+  /** Fracción de filas de una banda (inclinada) que tienen tinta oscura: ¿hay dígitos? */
+  function bandHasInk(img, y0, y1, sl) {
+    var W = img.w, H = img.h;
+    if (y0 < 0 || y1 > H || y1 - y0 < 8) return 0;
+    var vals = [], x, y;
+    for (y = y0; y < y1; y += 2) for (x = W * 0.2; x < W * 0.92; x += 3) vals.push(sample(img, x, y + sl * (x - W / 2)));
+    vals.sort(function (p, q) { return p - q; });
+    var med = vals[vals.length >> 1], withInk = 0, rows = 0;
+    for (y = y0 + (y1 - y0) * 0.08; y < y1 - (y1 - y0) * 0.08; y += 2) {
+      rows++;
+      var k = 0;
+      for (x = W * 0.2; x < W * 0.92; x += 3) if (sample(img, x, y + sl * (x - W / 2)) < med - 30) k++;
+      if (k >= 3) withInk++;
+    }
+    return rows ? withInk / rows : 0;
+  }
+
+  /** Borde vertical del LCD (línea fina oscura o salto a oscuro) entre xa..xb, perpendicular a las filas. */
+  function vEdge(img, xa, xb, yTop, yBot, sl, dir) {
+    var best = null;
+    for (var x = Math.max(2, Math.round(xa)); x <= Math.min(img.w - 3, Math.round(xb)); x++) {
+      var hits = 0, n = 0;
+      for (var y = yTop + (yBot - yTop) * 0.1; y < yBot - (yBot - yTop) * 0.1; y += 3) {
+        var xx = x - sl * (y - img.h / 2), c = sample(img, xx, y), l = sample(img, xx - 5, y), r = sample(img, xx + 5, y);
+        n++; if (Math.min(l, r) - c > 12 || (dir < 0 ? r - c > 25 : l - c > 25)) hits++;
+      }
+      var cover = hits / n;
+      if (!best || cover > best.cover || (cover === best.cover && (dir < 0 ? x < best.x : x > best.x))) best = { x: x, cover: cover };
+    }
+    return best && best.cover > 0.5 ? best.x : null;
+  }
+
+  /** Punto (x, y) de la vista enderezada que produce prepareLcd → px del frame. */
+  function rectPointToFrame(quad, size, x, y) {
+    var c = quadCenter(quad);
+    var q = quad.map(function (p) { return { x: c.x + (p.x - c.x) * 0.98, y: c.y + (p.y - c.y) * 0.98 }; });
+    var hm = homography(q, [{ x: 0, y: 0 }, { x: size.w - 1, y: 0 }, { x: size.w - 1, y: size.h - 1 }, { x: 0, y: size.h - 1 }]);
+    return hm ? applyH(hm, x, y) : null;
+  }
+
+  /**
+   * Ubica el LCD del HTC-2 dentro de un cuadrilátero aproximado por sus separadores.
+   * @returns { quad (LCD derecho, px del frame), s1, s2 (separadores, fracción del alto) } o null
+   */
+  function findHtc2Lcd(frame, quad) {
+    var lcd = prepareLcd(frame, quad, 480), img = lcd.img, W = img.w, H = img.h;
+    var lines = hLines(img), best = null;
+    for (var i = 0; i + 1 < lines.length; i++) {
+      var a = lines[i], b = lines[i + 1], D = b.y - a.y, sl = (a.slope + b.slope) / 2;
+      if (D < H * 0.12 || Math.abs(a.a - b.a) > 2) continue;
+      // las tres filas (arriba, entre y abajo de los separadores) deben tener dígitos
+      var i1 = bandHasInk(img, Math.round(a.y - D * 0.95), Math.round(a.y - 4), sl), i2 = bandHasInk(img, Math.round(a.y + 4), Math.round(b.y - 4), sl), i3 = bandHasInk(img, Math.round(b.y + 4), Math.round(b.y + D * 0.95), sl);
+      var ink = Math.min(i1, i2, i3) >= 0.6 ? i1 + i2 + i3 : 0;
+      var score = ink + a.cover + b.cover;
+      if (ink >= 2.5 && (!best || score > best.score)) best = { score: score, a: a, b: b, D: D, sl: sl };
+    }
+    if (!best) return null;
+    var A = best.a, B = best.b, DD = best.D, S = best.sl;
+    // bordes sup./inf.: línea detectada a la distancia típica o la proporción del HTC-2
+    var topL = lines.filter(function (l) { return l.y < A.y && A.y - l.y > DD * 0.8 && A.y - l.y < DD * 1.4; })[0];
+    var botL = lines.filter(function (l) { return l.y > B.y && l.y - B.y > DD * 0.8 && l.y - B.y < DD * 1.45; })[0];
+    var top = topL ? topL.y : A.y - DD * 1.1, bot = botL ? botL.y : B.y + DD * 1.17;
+    var left = vEdge(img, 0, W * 0.2, top, bot, S, -1), right = vEdge(img, W * 0.8, W - 1, top, bot, S, 1);
+    if (left == null) left = 0;
+    if (right == null) right = W - 1;
+    var yAt = function (y0, x) { return y0 + S * (x - W / 2); }, xAt = function (x0, y) { return x0 - S * (y - H / 2); };
+    var corners = [[left, top], [right, top], [right, bot], [left, bot]].map(function (p) { return rectPointToFrame(quad, lcd.size, xAt(p[0], p[1]), yAt(p[1], p[0])); });
+    if (corners.some(function (p) { return !p; })) return null;
+    return { quad: corners, s1: (A.y - top) / (bot - top), s2: (B.y - top) / (bot - top) };
+  }
+
+  /** Grupos de tinta (dígitos y símbolos) de una banda horizontal [y0, y1] de una imagen derecha. */
+  function inkGroups(img, y0, y1) {
+    var W = img.w, h = y1 - y0, vals = [], x, y;
+    for (y = y0; y < y1; y++) for (x = 0; x < W; x += 2) vals.push(img.d[y * W + x]);
+    vals.sort(function (p, q) { return p - q; });
+    var med = vals[vals.length >> 1], thr = med - Math.max(30, (med - vals[Math.floor(vals.length * 0.02)]) * 0.4);
+    var col = new Float32Array(W), top = new Int32Array(W), bot = new Int32Array(W);
+    for (x = 0; x < W; x++) { top[x] = -1; bot[x] = -1; for (y = y0; y < y1; y++) if (img.d[y * W + x] < thr) { col[x]++; if (top[x] < 0) top[x] = y; bot[x] = y; } }
+    var groups = [], g = null, gap = 0;
+    for (x = Math.round(W * 0.03); x < W * 0.97; x++) {
+      if (col[x] >= Math.max(2, h * 0.1)) {
+        if (!g || gap > h * 0.08) { g = { x0: x, x1: x, y0: top[x], y1: bot[x] }; groups.push(g); }
+        g.x1 = x; g.y0 = Math.min(g.y0, top[x]); g.y1 = Math.max(g.y1, bot[x]); gap = 0;
+      } else gap++;
+    }
+    groups.forEach(function (q) { q.ext = (q.y1 - q.y0) / h; q.w = q.x1 - q.x0; });
+    return groups;
+  }
+
+  /**
+   * Coloca los cuadros de lectura sobre los dígitos de un LCD de HTC-2 ya derecho
+   * (s1, s2: separadores). Prueba pocos candidatos (borde derecho de cada grupo,
+   * ancho de dígito, inclinación) y se queda con el que lee números válidos con más
+   * confianza sin dejar dígitos afuera. @returns { fields (fracciones), slantDeg, confidence }
+   */
+  function fieldsOnDigits(img, s1, s2, base, opts) {
+    opts = opts || {};
+    var W = img.w, H = img.h, light = opts.lightSegments;
+    var bands = [[0.03, s1 - 0.03], [s1 + 0.03, s2 - 0.03], [s2 + 0.03, 0.97]].map(function (b) { return [Math.round(b[0] * H), Math.round(b[1] * H)]; });
+    var G3 = bands.map(function (b) { return inkGroups(img, b[0], b[1]); });
+    var vext = function (gs, b) {
+      var d = gs.filter(function (g) { return g.ext >= 0.75; });
+      return d.length ? [Math.min.apply(null, d.map(function (g) { return g.y0; })), Math.max.apply(null, d.map(function (g) { return g.y1; }))] : [b[0], b[1]];
+    };
+    var dec = function (f, slant, fmt) { return decodeField(img, f, { digits: f.digits, decimals: f.decimals, slantDeg: slant, lightSegments: light, format: fmt }); };
+    var num = /^-?\d+(\.\d)?$/, best = null;
+    var rights = [];
+    G3[0].concat(G3[1]).forEach(function (g) { if (g.ext >= 0.75 && g.x1 > W * 0.5 && rights.indexOf(g.x1) < 0) rights.push(g.x1); });
+    var ys = [vext(G3[0], bands[0]), vext(G3[1], bands[1])];
+    var dIn = base.tempIn || { digits: 3, decimals: 1 }, dOut = base.tempOut || dIn;
+    [0, 4, 8, 12].forEach(function (slant) {
+      rights.forEach(function (r) {
+        [0.7, 0.8, 0.9].forEach(function (cellK) {
+          var fs = ys.map(function (yy, i) {
+            var spec = i ? dOut : dIn, h = (yy[1] - yy[0]) * 1.06, cell = cellK * h, right = r + 0.05 * cell;
+            var own = G3[i].filter(function (g) { return g.ext >= 0.75 && g.x1 <= r + 2 && g.x0 >= r - (spec.digits + 0.4) * cell; });
+            var x0 = right - spec.digits * cell;
+            if (own.length) x0 = Math.min(x0, Math.min.apply(null, own.map(function (g) { return g.x0; })) - 0.08 * cell);
+            return { x: x0, y: (yy[0] + yy[1]) / 2 - h / 2, w: right - x0, h: h, digits: spec.digits, decimals: spec.decimals };
+          });
+          if (fs[0].x < 0 || fs[1].x < 0) return;
+          var sc = 0;
+          fs.forEach(function (f, i) {
+            var rr = dec(f, slant, "number");
+            // ningún dígito a la izquierda del borde queda afuera, y ninguno justo a la derecha (número cortado)
+            var left = G3[i].filter(function (g) { return g.ext >= 0.75 && g.x1 <= r + 2; }), tot = 0, inn = 0;
+            left.forEach(function (g) { tot += g.w; inn += Math.max(0, Math.min(g.x1, r + 2) - Math.max(g.x0, f.x)); });
+            var cover = tot ? inn / tot : 1;
+            var cut = G3[i].some(function (g) { return g.ext >= 0.75 && g.w >= 0.3 * f.h && g.x0 > r + 2 && g.x0 < r + 1.2 * cellK * f.h; }) ? 0.5 : 1;
+            sc += (num.test(rr.text) ? rr.confidence : rr.confidence * 0.3) * cover * cover * cut;
+          });
+          if (!best || sc > best.sc) best = { sc: sc, slant: slant, fs: fs };
+        });
+      });
+    });
+    var slant = best ? best.slant : opts.slantDeg || 6;
+    var out = JSON.parse(JSON.stringify(base)), conf = {};
+    var put = function (k, f) { out[k].x = f.x / W; out[k].y = f.y / H; out[k].w = f.w / W; out[k].h = f.h / H; };
+    if (best) { put("tempIn", best.fs[0]); put("tempOut", best.fs[1]); }
+    // humedad: los dos dígitos anchos más a la derecha de la tercera fila; hora: lo de su izquierda
+    var y3 = vext(G3[2], bands[2]), h3 = y3[1] - y3[0];
+    var wide = G3[2].filter(function (q) { return q.ext >= 0.75 && q.w >= 0.3 * h3; });
+    var hs = base.humidity || { digits: 2, decimals: 0 };
+    var right3 = wide.filter(function (q) { return q.x1 > W * 0.45; }).slice(-hs.digits);
+    if (right3.length && out.humidity) {
+      var hb = null;
+      [0.7, 0.8, 0.9].forEach(function (cellK) {
+        var g = right3[right3.length - 1], h = h3 * 1.06, x0 = right3[0].x0, w = Math.max(hs.digits * cellK * h, (g.x1 - x0) * 1.12);
+        var f = { x: g.x1 + 0.05 * cellK * h - w, y: (y3[0] + y3[1]) / 2 - h / 2, w: w, h: h, digits: hs.digits, decimals: hs.decimals };
+        var r = dec(f, slant, "number"), v = +r.text, sc = /^\d+$/.test(r.text) && v >= 5 && v <= 99 ? r.confidence : r.confidence * 0.3;
+        if (!hb || sc > hb.sc) hb = { sc: sc, f: f };
+      });
+      put("humidity", hb.f);
+      var leftG = G3[2].filter(function (q) { return q.ext >= 0.5 && q.x1 < hb.f.x - 0.05 * W; });
+      if (leftG.length && out.time) {
+        var tx0 = Math.min.apply(null, leftG.map(function (q) { return q.x0; })), tx1 = Math.max.apply(null, leftG.map(function (q) { return q.x1; }));
+        var ty0 = Math.min.apply(null, leftG.map(function (q) { return q.y0; })), ty1 = Math.max.apply(null, leftG.map(function (q) { return q.y1; }));
+        put("time", { x: tx0 - 0.02 * W, y: ty0 - 0.03 * (ty1 - ty0), w: tx1 - tx0 + 0.04 * W, h: (ty1 - ty0) * 1.06 });
+      }
+    }
+    // afinado final de cada campo por la confianza de lectura
+    Object.keys(out).forEach(function (k) {
+      if (!out[k].enabled) return;
+      var r = refineField(img, out[k], { slantDeg: slant, lightSegments: light, format: k === "time" ? "time" : "number" });
+      out[k] = r.field; conf[k] = r.confidence;
+    });
+    return { fields: out, slantDeg: slant, confidence: conf };
+  }
+
+  /**
+   * HTC-2 por su estructura real: separadores → LCD derecho → cuadros sobre los dígitos.
+   * @returns { quad (LCD, px), fields, slantDeg, confidence, score } o null si no se ven los separadores
+   */
+  function locateHtc2(frame, quad, base, opts) {
+    var lcdLoc = findHtc2Lcd(frame, quad);
+    if (!lcdLoc) return null;
+    var lcd = prepareLcd(frame, lcdLoc.quad, 480);
+    var r = fieldsOnDigits(lcd.img, lcdLoc.s1, lcdLoc.s2, base, opts);
+    var cs = Object.keys(r.confidence).map(function (k) { return r.confidence[k]; });
+    var mean = cs.length ? cs.reduce(function (a, b) { return a + b; }, 0) / cs.length : 0;
+    return { quad: lcdLoc.quad, fields: r.fields, slantDeg: r.slantDeg, confidence: r.confidence, score: 0.3 + mean / 400, method: "separadores" };
+  }
+
   /**
    * «Encajar» un sensor: dentro del cuadrilátero que marcó el usuario (o el detector),
    * ubica el LCD del HTC-2 por sus dígitos, lo devuelve ajustado al LCD y coloca los
@@ -1296,6 +1527,36 @@
    */
   function snapHtc2(frame, quad, base, opts) {
     opts = opts || {};
+    // 1) estructura real (separadores). Solo se acepta si lo que lee tiene forma de
+    //    temperatura y humedad; si no, se compara con el ajuste del modelo (2).
+    var real = !opts.noAngle && !opts.modelOnly ? locateHtc2(frame, quad, base, opts) : null;
+    if (real && plausibleHtc2(frame, real) >= 3) return real;
+    var model = snapModel(frame, quad, base, opts);
+    if (!real) return model;
+    if (!model) return plausibleHtc2(frame, real) >= 2 ? real : null;
+    return plausibleHtc2(frame, real) > plausibleHtc2(frame, model) ? real : model;
+  }
+
+  /**
+   * Cuántas de las tres lecturas (IN, OUT, humedad) son plausibles: temperatura con 3 dígitos
+   * (p. ej. 28.3) entre −20 y 60 °C, humedad de 2 dígitos entre 5 y 99 %, confianza ≥ 50 %.
+   * res.meanConf queda con la confianza media de las plausibles (para comparar resultados).
+   */
+  function plausibleHtc2(frame, res) {
+    var lcd = prepareLcd(frame, res.quad, 480), ok = 0, sum = 0;
+    ["tempIn", "tempOut", "humidity"].forEach(function (k) {
+      var f = res.fields[k];
+      if (!f) return;
+      var r = decodeField(lcd.img, { x: f.x * lcd.size.w, y: f.y * lcd.size.h, w: f.w * lcd.size.w, h: f.h * lcd.size.h }, { digits: f.digits, decimals: f.decimals, slantDeg: res.slantDeg != null ? res.slantDeg : 6 });
+      var v = parseFloat(r.text);
+      var shapeOk = k === "humidity" ? /^\d{2}$/.test(r.text) && v >= 5 && v <= 99 : /^-?\d{2}\.\d$/.test(r.text) && v >= -20 && v <= 60;
+      if (shapeOk && r.confidence >= 50) { ok++; sum += r.confidence; }
+    });
+    res.meanConf = ok ? sum / ok : 0;
+    return ok;
+  }
+
+  function snapModel(frame, quad, base, opts) {
     var lcd = prepareLcd(frame, quad, 480);
     var fit = fitHtc2(lcd.img, base, opts.hint ? Object.assign({}, opts, { hint: { x: opts.hint.x * lcd.size.w, y: opts.hint.y * lcd.size.h, w: opts.hint.w * lcd.size.w, h: opts.hint.h * lcd.size.h } }) : opts);
     if (!fit) return null;
@@ -1309,7 +1570,7 @@
       if (Math.abs(ang) > 0.017) {
         var c0 = quadCenter(lcdQuad), cs = Math.cos(ang), sn = Math.sin(ang), g = 1.12;
         var rq = lcdQuad.map(function (p) { var dx = (p.x - c0.x) * g, dy = (p.y - c0.y) * g; return { x: c0.x + dx * cs - dy * sn, y: c0.y + dx * sn + dy * cs }; });
-        var again = snapHtc2(frame, rq, base, Object.assign({}, opts, { noAngle: true, hint: { x: 0.06 / g, y: 0.06 / g, w: 1 / g, h: 1 / g } }));
+        var again = snapModel(frame, rq, base, Object.assign({}, opts, { noAngle: true, hint: { x: 0.06 / g, y: 0.06 / g, w: 1 / g, h: 1 / g } }));
         if (again && again.score >= fit.score) return again;
       }
     }
@@ -1413,7 +1674,7 @@
       ["tempIn", "tempOut", "humidity"].forEach(function (k) {
         var fl = sn.fields[k];
         if (!fl) return;
-        var r = decodeField(lcd.img, { x: fl.x * lcd.size.w, y: fl.y * lcd.size.h, w: fl.w * lcd.size.w, h: fl.h * lcd.size.h }, { digits: fl.digits, decimals: fl.decimals, slantDeg: opts.slantDeg, lightSegments: opts.lightSegments });
+        var r = decodeField(lcd.img, { x: fl.x * lcd.size.w, y: fl.y * lcd.size.h, w: fl.w * lcd.size.w, h: fl.h * lcd.size.h }, { digits: fl.digits, decimals: fl.decimals, slantDeg: sn.slantDeg != null ? sn.slantDeg : opts.slantDeg, lightSegments: opts.lightSegments });
         var v = parseFloat(r.text), plausible = /^-?\d+(\.\d)?$/.test(r.text) && (k === "humidity" ? v >= 5 && v <= 99 : v >= -20 && v <= 60);
         if (plausible && r.confidence >= 30) { ok++; confSum += r.confidence; }
       });
@@ -1422,7 +1683,7 @@
       var meanConf = confSum / ok;
       var cc = quadCenter(sn.quad);
       if (out.some(function (o) { return pointInQuad(o.quad, cc); })) return; // misma pantalla
-      out.push({ quad: sn.quad, score: sn.score * 1000 + meanConf, area: quadArea(sn.quad), kind: "dígitos", fields: sn.fields, confidence: sn.confidence });
+      out.push({ quad: sn.quad, score: sn.score * 1000 + meanConf, area: quadArea(sn.quad), kind: "dígitos", fields: sn.fields, slantDeg: sn.slantDeg, confidence: sn.confidence });
     });
     return out.sort(function (a, b) { return b.score - a.score; });
   }
@@ -1588,11 +1849,12 @@
       var app = s.tpl && s.tpl.app;
       if (!app) { out[s.id] = { quad: null, score: 0, how: "sin plantilla" }; return; }
       var best = null;
-      // 0. ¿Sigue exactamente donde estaba? (lo normal: el equipo no se mueve). Se exige
-      //    parecido con la plantilla Y dígitos donde la calibración dice → no se mueve nada.
+      // 0. ¿Sigue donde estaba? (lo normal: el equipo no se mueve). Si se parece mucho a la
+      //    plantilla se queda; si se parece algo, además debe tener dígitos donde la
+      //    calibración dice. Así un sensor aceptado no aparece «no encontrado» sin moverse.
       if (s.last && !taken.some(function (t) { return pointInQuad(t, quadCenter(s.last)); })) {
         var v0 = ncc(appearance(frame, s.last), app);
-        if (v0 >= 0.7 && (!s.fields || screenScore(frame, s.last, s.fields, opts) >= minDigits)) {
+        if (v0 >= 0.8 || (v0 >= 0.55 && (!s.fields || screenScore(frame, s.last, s.fields, opts) >= minDigits))) {
           out[s.id] = { quad: s.last, score: v0, how: "en su lugar" };
           taken.push(expandQuad(s.last, 1.2));
           return;
@@ -1819,6 +2081,9 @@
     fitHtc2: fitHtc2,
     refineField: refineField,
     snapHtc2: snapHtc2,
+    plausibleHtc2: plausibleHtc2,
+    locateHtc2: locateHtc2,
+    findHtc2Lcd: findHtc2Lcd,
     detectHtc2: detectHtc2,
     rectToFrame: rectToFrame,
     screenScore: screenScore,
