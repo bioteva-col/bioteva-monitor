@@ -1400,6 +1400,8 @@
         '<button class="btn" id="repChanges" type="button">¿Hubo cambios importantes este día?</button>' +
         '<button class="btn primary" id="repGen" type="button">Generar reporte diario</button>' +
         '<button class="btn" id="repXlsx" type="button">⤓ Excel de este día</button></div>' +
+        '<div class="row-actions"><button class="btn" id="repPanel" type="button">⤓ Resumen para el panel de seguimiento</button>' +
+        '<span class="hint">Últimas 24 h: valores, promedios por hora y alertas (sin imágenes). Súbelo en el panel → <b>Monitoreo</b>.</span></div>' +
         '<div id="repOut"></div>' +
       "</div></div>" +
       '<div class="panel"><header><h2>Reportes guardados</h2></header><div class="panel-body">' +
@@ -1408,6 +1410,13 @@
           : '<p class="muted-text">Aún no hay reportes.</p>') +
       "</div></div>";
     $("#repDate").addEventListener("change", (e) => (reportDate = e.target.value || reportDate));
+    $("#repPanel").addEventListener("click", async () => {
+      const now = Date.now();
+      const [rs, es] = await Promise.all([App.store.readingsRange(now - 2 * DAY, now), App.store.eventsRange(now - 7 * DAY, now)]);
+      const doc = L.buildSummary(rs, es, App.sensors, App.settings, now);
+      download(new Blob([JSON.stringify(doc, null, 1)], { type: "application/json" }), "bioteva-resumen_" + stamp() + ".json");
+      toast("Resumen descargado: súbelo en el panel → Monitoreo.");
+    });
     const dayData = async () => {
       const b = L.dayBounds(reportDate);
       const [rs, es] = await Promise.all([App.store.readingsRange(b.from, b.to), App.store.eventsRange(b.from, b.to)]);

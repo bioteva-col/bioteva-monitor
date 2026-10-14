@@ -2826,7 +2826,54 @@
     return { readings: readings, events: events, stepSec: step / 1000 };
   }
 
+  /**
+   * Resumen compacto para la página de seguimiento (panel): último valor, hoy y
+   * promedios por hora de las últimas 24 h, más las alertas recientes. Solo números
+   * y textos de eventos: nunca imágenes. Las lecturas de simulación se marcan.
+   * readings/events: últimas ~24 h (o más); now: ms.
+   */
+  function buildSummary(readings, events, sensors, S, now) {
+    var r = function (v, d) { return v == null || !isFinite(v) ? null : Math.round(v * Math.pow(10, d)) / Math.pow(10, d); };
+    var stat = function (vals, d) { var x = describe(vals); return x.n ? { min: r(x.min, d), max: r(x.max, d), mean: r(x.mean, d), n: x.n } : null; };
+    var dayStart = dayBounds(dayKey(now)).from, from24 = now - 24 * 3600000;
+    return {
+      version: 1,
+      generatedAt: now,
+      intervalSec: S.intervalSec,
+      sensors: sensors.map(function (s) {
+        var ck = controlKey(s);
+        var mine = readings.filter(function (x) { return x.sensorId === s.id; }).sort(function (a, b) { return a.ts - b.ts; });
+        var last = mine.length ? mine[mine.length - 1] : null;
+        var today = mine.filter(function (x) { return x.ts >= dayStart; });
+        var hourly = [];
+        for (var h = 23; h >= 0; h--) {
+          var h0 = Math.floor((now - h * 3600000) / 3600000) * 3600000;
+          var inH = mine.filter(function (x) { return x.ts >= h0 && x.ts < h0 + 3600000; });
+          if (!inH.length) continue;
+          var c = describe(inH.map(function (x) { return x[ck]; })), hu = describe(inH.map(function (x) { return x.humidity; }));
+          hourly.push({ ts: h0, control: r(c.mean, 1), humidity: r(hu.mean, 0), n: inH.length });
+        }
+        var st = currentStatus(s, last, now, S);
+        return {
+          id: s.id, name: s.name, enabled: !!s.enabled,
+          control: ck === "tempOut" ? "OUT" : "IN",
+          status: st.code, statusLabel: STATUS_LABELS[st.code] || st.code, note: st.note || "",
+          last: last ? { ts: last.ts, tempIn: r(last.tempIn, 1), tempOut: r(last.tempOut, 1), humidity: r(last.humidity, 0), confidence: r(last.confidence, 0), level: last.level, source: last.source } : null,
+          today: { readings: today.length, control: stat(today.map(function (x) { return x[ck]; }), 1), humidity: stat(today.map(function (x) { return x.humidity; }), 0) },
+          limits: { tempMin: s.tempMin, tempMax: s.tempMax, humMin: s.humMin, humMax: s.humMax },
+          hourly: hourly,
+        };
+      }),
+      alerts: events.filter(function (e) { return e.severity !== "INFO" && e.ts >= from24; }).sort(function (a, b) { return b.ts - a.ts; }).slice(0, 15).map(function (e) {
+        return { ts: e.ts, sensorId: e.sensorId, type: e.type, label: EVENT_LABELS[e.type] || e.type, severity: e.severity, description: e.description, ack: !!e.ack, source: e.source };
+      }),
+      openAlerts: events.filter(function (e) { return e.severity !== "INFO" && !e.ack; }).length,
+      simulation: readings.some(function (x) { return x.ts >= from24 && x.source !== "camera"; }),
+    };
+  }
+
   root.MonLogic = {
+    buildSummary: buildSummary,
     FIELD_KEYS: FIELD_KEYS,
     FIELD_LABELS: FIELD_LABELS,
     LEVEL_LABELS: LEVEL_LABELS,
@@ -5347,6 +5394,8 @@
         '<button class="btn" id="repChanges" type="button">¿Hubo cambios importantes este día?</button>' +
         '<button class="btn primary" id="repGen" type="button">Generar reporte diario</button>' +
         '<button class="btn" id="repXlsx" type="button">⤓ Excel de este día</button></div>' +
+        '<div class="row-actions"><button class="btn" id="repPanel" type="button">⤓ Resumen para el panel de seguimiento</button>' +
+        '<span class="hint">Últimas 24 h: valores, promedios por hora y alertas (sin imágenes). Súbelo en el panel → <b>Monitoreo</b>.</span></div>' +
         '<div id="repOut"></div>' +
       "</div></div>" +
       '<div class="panel"><header><h2>Reportes guardados</h2></header><div class="panel-body">' +
@@ -5355,6 +5404,13 @@
           : '<p class="muted-text">Aún no hay reportes.</p>') +
       "</div></div>";
     $("#repDate").addEventListener("change", (e) => (reportDate = e.target.value || reportDate));
+    $("#repPanel").addEventListener("click", async () => {
+      const now = Date.now();
+      const [rs, es] = await Promise.all([App.store.readingsRange(now - 2 * DAY, now), App.store.eventsRange(now - 7 * DAY, now)]);
+      const doc = L.buildSummary(rs, es, App.sensors, App.settings, now);
+      download(new Blob([JSON.stringify(doc, null, 1)], { type: "application/json" }), "bioteva-resumen_" + stamp() + ".json");
+      toast("Resumen descargado: súbelo en el panel → Monitoreo.");
+    });
     const dayData = async () => {
       const b = L.dayBounds(reportDate);
       const [rs, es] = await Promise.all([App.store.readingsRange(b.from, b.to), App.store.eventsRange(b.from, b.to)]);
