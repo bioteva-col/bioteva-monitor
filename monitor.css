@@ -500,3 +500,9 @@ table.limits td.cal { white-space: nowrap; }
 table.limits td.cal .btn { padding: 0 6px; }
 .ep-st svg { vertical-align: -2px; }
 ol.cal-progress li[data-calstep], ol.cal-progress li[data-calsensor] { cursor: pointer; }
+
+/* ── Plan tecnológico (sección adicional) ── */
+.plan .plan-steps, .plan .plan-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; line-height: 1.5; }
+.plan code { font-family: var(--mono); font-size: .92em; background: var(--surface2); border-radius: 6px; padding: 1px 6px; }
+.plan pre.report code { background: none; padding: 0; }
+.plan details pre.report { margin-top: 10px; }

@@ -1,7 +1,7 @@
 /* Service worker de BioTeva Monitor: guarda la app en caché para abrirla sin
    internet (y sin el servidor local) una vez instalada. Los datos no pasan por
    aquí: viven en IndexedDB. Cambia VERSION al publicar archivos nuevos. */
-const VERSION = "bioteva-monitor-v9";
+const VERSION = "bioteva-monitor-v10";
 const ASSETS = [
   "./",
   "index.html",

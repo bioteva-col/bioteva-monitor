@@ -5260,6 +5260,7 @@
       case "reportes": return renderReports();
       case "configuracion": return renderSettings();
       case "ayuda": return null; // guía estática (index.html)
+      case "plan": return null; // hoja de ruta estática (index.html); el botón se enlaza en init
     }
   }
 
@@ -5369,6 +5370,23 @@
     return null;
   }
 
+  /** «Últimos registros»: las lecturas guardadas más recientes (también tras apagar el equipo). */
+  function lastRecordsHtml(rows) {
+    const last = rows.slice().sort((a, b) => b.ts - a.ts).slice(0, 12);
+    const cell = (r, k, dec) => {
+      if (r[k] != null) return esc(fmt(r[k], dec));
+      const f = r.fields && r.fields[k];
+      return f && f.value != null ? '<span class="doubt" title="Lectura dudosa: no se usa">' + esc(fmt(f.value, dec)) + "?</span>" : "–";
+    };
+    return '<div class="panel" style="margin-top:20px"><header><h2>Últimos registros</h2><div class="spacer"></div><a class="btn ghost small" href="#historico" data-go="historico">Ver historial →</a></header>' +
+      (last.length
+        ? '<div class="table-scroll"><table><thead><tr><th>Cuándo</th><th>Caja</th><th>Temp. caja (OUT)</th><th>Temp. cuarto (IN)</th><th>Humedad</th><th>Estado</th></tr></thead><tbody>' +
+          last.map((r) => { const s = sensorById(r.sensorId); return "<tr><td>" + esc(fmtWhen(r.ts)) + (r.source === "simulation" ? ' <span class="tag">simulación</span>' : "") + "</td><td>" + esc(s ? s.name : r.sensorId) + "</td><td>" + cell(r, "tempOut", 1) + " °C</td><td>" + cell(r, "tempIn", 1) + " °C</td><td>" + cell(r, "humidity", 0) + " %</td><td>" + statusChip(r.status) + "</td></tr>"; }).join("") +
+          "</tbody></table></div>"
+        : '<div class="panel-body"><p class="muted-text">Aún no hay registros en los últimos 7 días. Toca «▶ Iniciar monitoreo» para empezar a guardar lecturas.</p></div>') +
+      "</div>";
+  }
+
   async function renderDashboard() {
     const host = $('section[data-view="dashboard"]');
     const now = Date.now(), S = App.settings;
@@ -5420,7 +5438,7 @@
         '<div class="panel"><header><h2>Hoy en resumen</h2></header><div class="panel-body col">' + (resumen.join("") || '<p class="muted-text">No hay sensores activos.</p>') +
           '<button class="btn small" id="askToday" type="button">¿Hubo cambios importantes hoy?</button><div id="todayAnswer" class="answer" hidden></div></div></div>' +
         lampsHtml + camHtml +
-      "</div>";
+      "</div>" + lastRecordsHtml(await App.store.readingsRange(now - 7 * DAY, now));
 
     $$("[data-caja]", host).forEach((b) => b.addEventListener("click", () => { App.caja.sensor = b.dataset.caja; App.caja.period = "today"; showView("caja"); }));
     $$("[data-act]", host).forEach((btn) => btn.addEventListener("click", () => {
@@ -6877,6 +6895,12 @@
       if (res && res.length) toast("Lectura registrada: " + res.map((r) => sensorById(r.reading.sensorId).name + " " + (L.STATUS_LABELS[r.reading.status] || r.reading.status)).join(" · "));
     });
     $("#installBtn").addEventListener("click", promptInstall);
+    // Plan tecnológico: copiar el prompt para Claude Code
+    $("#planCopy").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText($("#planPrompt").textContent); toast("Prompt copiado. Pégalo en Claude Code."); }
+      catch (e) { toast("No se pudo copiar: abre «Ver el prompt» y cópialo a mano.", "warn"); }
+    });
+    bindGo($('section[data-view="plan"]'));
     window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); App.installPrompt = e; $("#installBtn").hidden = false; });
     window.addEventListener("appinstalled", () => { $("#installBtn").hidden = true; toast("BioTeva Monitor quedó instalado en este computador."); });
     document.addEventListener("visibilitychange", async () => {

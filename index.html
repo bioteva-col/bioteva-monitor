@@ -54,6 +54,7 @@
     <button type="button" data-view="reportes">Reportes</button>
     <button type="button" data-view="graficas">Gráficas por periodo</button>
     <button type="button" data-view="configuracion">Avanzado</button>
+    <button type="button" data-view="plan">Plan tecnológico</button>
     <button type="button" data-view="ayuda">Cómo usar</button>
   </nav>
   <!-- ───────────── DASHBOARD ───────────── -->
@@ -234,6 +235,303 @@
   <section data-view="configuracion" class="col" hidden></section>
 
   <!-- ───────────── CÓMO USAR (guía sencilla) ───────────── -->
+  <!-- ───────────── PLAN TECNOLÓGICO (adicional; fuente: documento «BIOTEVA - Prompt Master para Claude Code», 2026-10-26) ───────────── -->
+  <section data-view="plan" class="col plan" hidden>
+    <div class="page-head"><h1>Plan tecnológico</h1><span class="chip soft info">Hoja de ruta · adicional</span></div>
+    <p class="muted-text">Cómo puede crecer el monitoreo de BIOTEVA en tres niveles: sensores propios, visión por cámara y una plataforma de datos. Esta sección es una guía: <b>no cambia</b> cómo funciona hoy la app (lectura de los HTC-2 con la cámara).</p>
+    <div class="banner muted"><span>Fuente: documento <b>«BIOTEVA - Prompt Master para Claude Code»</b> (26-oct-2026). Costos, tiempos, rangos y cifras son los del documento: <b>no verificados</b> por la app. Los límites que usa la app para avisarte siguen siendo los que tú pones en <a href="#sensores" data-go="sensores">Sensores y límites</a>.</span></div>
+
+    <div class="panel"><header><h2>Cómo usar esta guía</h2></header><div class="panel-body">
+      <ol class="plan-steps">
+        <li>Ve a <b>«El prompt completo»</b> (abajo) y toca <b>Copiar prompt</b>.</li>
+        <li>Abre Claude Code en tu terminal: <code>claude</code> (o desde el editor).</li>
+        <li>Pega el prompt. Claude Code lee el proyecto, instala dependencias y construye cada módulo, pidiéndote aprobar los pasos importantes.</li>
+        <li>Sigue el orden de fases: primero sensores (IoT), luego visión, luego la plataforma.</li>
+        <li>Usa los <b>comandos de validación</b> para comprobar cada parte antes de seguir.</li>
+      </ol>
+    </div></div>
+
+    <div class="panel"><header><h2>Los tres niveles</h2></header><div class="panel-body col" style="gap:14px">
+      <div class="kpis">
+        <div class="kpi"><span>Nivel 1 · MVP IoT</span><span class="v">2–4 sem.</span><span class="s">sensores + panel · USD 200–500</span></div>
+        <div class="kpi"><span>Nivel 2 · Visión (YOLOv8)</span><span class="v">4–8 sem.</span><span class="s">+ USD 150–300</span></div>
+        <div class="kpi"><span>Nivel 3 · Plataforma / API</span><span class="v">3–6 meses</span><span class="s">costo variable</span></div>
+      </div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Nivel</th><th>Tecnología</th></tr></thead>
+        <tbody>
+          <tr><td><b>1</b></td><td>ESP32 + DHT22 + MQ-135, MQTT (Mosquitto), Node-RED, InfluxDB, Grafana, alertas por Telegram</td></tr>
+          <tr><td><b>2</b></td><td>Raspberry Pi 5 + AI Camera, YOLOv8 nano (Ultralytics), entrenamiento en Google Colab, API REST</td></tr>
+          <tr><td><b>3</b></td><td>Python/FastAPI + PostgreSQL, PyTorch, Streamlit, despliegue en nube (capa gratuita)</td></tr>
+        </tbody>
+      </table></div>
+      <div>
+        <b>Parámetros de cría que propone el documento</b> <span class="chip line">no verificado</span>
+        <ul class="plan-list">
+          <li>Temperatura 28–32 °C (alerta si &lt; 22 °C o &gt; 36 °C)</li>
+          <li>Humedad relativa 50–70 % (alerta si &lt; 40 % o &gt; 80 %)</li>
+          <li>CO₂ &lt; 2.000 ppm · Fotoperiodo 12 h luz / 12 h oscuridad (configurable)</li>
+        </ul>
+        <p class="muted-text">La app no los aplica sola: si tu protocolo los confirma, escríbelos en Sensores y límites.</p>
+      </div>
+    </div></div>
+
+    <div class="panel"><header><h2>Módulo 1 · Monitoreo ambiental (IoT)</h2></header><div class="panel-body col" style="gap:12px">
+      <ul class="plan-list">
+        <li>Firmware para ESP32 que lee DHT22 (temperatura y humedad) y MQ-135 (CO₂) cada 30 s</li>
+        <li>Datos por MQTT al broker local (Mosquitto), guardados en InfluxDB con Node-RED</li>
+        <li>Panel Grafana en tiempo real y alertas por Telegram cuando algo sale de rango</li>
+        <li>Instalación con un solo comando en Raspberry Pi; umbrales por módulo en <code>.env</code></li>
+      </ul>
+      <details class="cal-adv"><summary>Archivos que genera</summary><pre class="report">bioteva-monitor/
+  firmware/   esp32_sensor.ino · config.h
+  server/     docker-compose.yml · mosquitto.conf · node-red-flows.json
+  dashboards/ grafana-bioteva.json
+  alerts/     telegram_alert.py
+  setup.sh · README.md</pre></details>
+    </div></div>
+
+    <div class="panel"><header><h2>Módulo 2 · Visión por cámara (YOLOv8)</h2></header><div class="panel-body col" style="gap:12px">
+      <ul class="plan-list">
+        <li>Captura periódica con Raspberry Pi 5 + AI Camera</li>
+        <li>Detección y conteo de grillos con YOLOv8 nano; densidad por módulo de cría</li>
+        <li>Clasificación por sexo (el documento cita 86,8 % de precisión, arXiv:2512.04311 — <i>no verificado</i>)</li>
+        <li>Detección de grillos inmóviles (posible mortalidad) y API REST para el panel</li>
+        <li>Recolección de un dataset propio y cuaderno de Google Colab para reentrenar con grillos colombianos</li>
+      </ul>
+      <details class="cal-adv"><summary>Archivos que genera</summary><pre class="report">bioteva-vision/
+  capture/   camera_capture.py · stream_server.py
+  inference/ detector.py · classifier.py · counter.py
+  api/       main.py · models.py
+  training/  collect_dataset.py · train_colab.ipynb
+  requirements.txt · docker-compose.yml</pre></details>
+    </div></div>
+
+    <div class="panel"><header><h2>Módulo 3 · Plataforma de datos</h2></header><div class="panel-body col" style="gap:12px">
+      <ul class="plan-list">
+        <li>App web en Streamlit con acceso por usuario</li>
+        <li>Tiempo real por módulo (temperatura, humedad, CO₂) y vista de visión (conteo, densidad)</li>
+        <li>Histórico con tendencias por lote y exportación a CSV/Excel</li>
+        <li>Trazabilidad de cada lote (de huevo a cosecha) y registro de alertas activa/resuelta</li>
+        <li>Predicción de rendimiento por lote (modelo PyTorch) y API documentada (OpenAPI)</li>
+      </ul>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Integración opcional</th><th>API</th><th>Para qué sirve</th></tr></thead>
+        <tbody>
+          <tr><td>Google Sheets</td><td>Sheets API v4</td><td>Exportar datos de lotes a una hoja compartida</td></tr>
+          <tr><td>Notion</td><td>Notion API</td><td>Registrar cada lote en una base de datos</td></tr>
+          <tr><td>Telegram</td><td>Bot API</td><td>Alertas críticas en tiempo real</td></tr>
+          <tr><td>WhatsApp</td><td>Twilio / Meta Cloud API</td><td>Alertas al número de la empresa</td></tr>
+          <tr><td>INVIMA (futuro)</td><td>API INVIMA</td><td>Trazabilidad regulatoria</td></tr>
+          <tr><td>Monday.com</td><td>Monday API</td><td>Tareas de mantenimiento a partir de alertas</td></tr>
+        </tbody>
+      </table></div>
+    </div></div>
+
+    <div class="panel"><header><h2>El prompt completo</h2><div class="spacer"></div><button class="btn primary" type="button" id="planCopy">Copiar prompt</button></header><div class="panel-body col" style="gap:12px">
+      <p class="muted-text">Pégalo completo en Claude Code y presiona Enter: construye los módulos en orden (1 → 4) y te dice cómo probar cada uno. Las contraseñas no van en el prompt: defínelas tú en <code>.env</code> / <code>st.secrets</code>.</p>
+      <details class="cal-adv"><summary>Ver el prompt</summary><pre class="report" id="planPrompt">Eres un ingeniero de software experto en IoT, visión computacional y plataformas de datos para agricultura de insectos. Voy a construir el sistema tecnológico de BIOTEVA, una empresa colombiana que produce grillos (Acheta domesticus) para consumo humano.
+
+## CONTEXTO DE LA EMPRESA
+- Producto: grillos para consumo humano (proteína alternativa)
+- Mercado: Colombia y LATAM, jóvenes 18-32 y aliados/inversores
+- Parámetros críticos de cría: Temp 28-32°C, Humedad 50-70%, CO₂ &lt; 2,000 ppm
+- Objetivo tecnológico: monitoreo IoT + visión computacional + plataforma de datos
+
+## LO QUE DEBES CONSTRUIR
+
+Construye los siguientes módulos en orden. Para cada uno, crea todos los archivos necesarios, instala dependencias, y verifica que funcione.
+
+---
+
+### MÓDULO 1: IoT — Monitoreo Ambiental (Nivel MVP)
+
+Crea el directorio `bioteva-monitor/` con esta estructura:
+
+bioteva-monitor/
+  firmware/main_esp32.ino     # Firmware Arduino para ESP32 + DHT22 + MQ135
+  broker/mosquitto.conf       # Config MQTT broker
+  flows/node_red_flow.json    # Flow Node-RED completo
+  docker-compose.yml          # Mosquitto + Node-RED + InfluxDB + Grafana
+  .env.example
+  README.md
+
+El firmware debe:
+- Leer temperatura y humedad (DHT22, pin GPIO4)
+- Leer CO₂ (MQ135, pin GPIO34 analógico)
+- Publicar JSON por MQTT cada 30 segundos: `{"modulo": "M1", "temp": 29.5, "hum": 65.2, "co2": 850, "timestamp": "..."}`
+- Enviar alerta si: temp &gt; 32 o &lt; 28, hum &gt; 70 o &lt; 50, co2 &gt; 2000
+- MQTT broker: 192.168.1.100, puerto 1883, topic: `bioteva/modulos/{id}`
+
+El docker-compose debe levantar:
+- Mosquitto (puerto 1883)
+- Node-RED (puerto 1880) — con el flow ya importado
+- InfluxDB (puerto 8086) — base de datos: `bioteva_iot`
+- Grafana (puerto 3000) — dashboard pre-configurado
+
+El flow de Node-RED debe:
+- Suscribirse a `bioteva/modulos/#`
+- Parsear JSON y escribir a InfluxDB
+- Enviar alerta a Telegram si hay valores fuera de rango
+- Topic de alerta en Telegram: configurable via variable de entorno `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`
+
+---
+
+### MÓDULO 2: Visión Computacional YOLOv8 (Nivel 2)
+
+Crea el directorio `bioteva-vision/` con esta estructura:
+
+bioteva-vision/
+  api/main.py                 # FastAPI REST
+  api/detector.py             # Clase BiotevaCricketDetector con YOLOv8
+  api/schemas.py
+  training/train_notebook.ipynb   # Google Colab notebook para entrenar
+  training/dataset_config.yaml    # Config dataset YOLO
+  tests/test_api.py
+  tests/test_detector.py
+  docker-compose.yml
+  requirements.txt
+  README.md
+
+El detector debe:
+- Cargar modelo YOLOv8 nano (`yolov8n.pt` como base, fine-tuning para grillos)
+- Detectar y contar grillos en imagen
+- Clasificar por tamaño: nymph (&lt; 0.5cm²), juvenile (0.5-2cm²), adult (&gt; 2cm²)
+- Calcular densidad: conteo / área_módulo_cm²
+- Retornar: `{"total": 450, "nymphs": 120, "juveniles": 230, "adults": 100, "density": 2.3, "health_score": 0.87}`
+
+La API FastAPI debe tener:
+- `POST /analyze` — recibe imagen, retorna detección completa
+- `GET /health` — estado del servicio
+- `GET /metrics` — métricas históricas del día
+- Autenticación: API key via header `X-API-Key`
+- Swagger UI en `/docs`
+
+El notebook de Google Colab debe incluir:
+- Instalación de Ultralytics
+- Descarga de dataset sintético de muestra
+- Entrenamiento por 50 epochs
+- Exportación del modelo a ONNX
+- Validación con métricas mAP
+
+---
+
+### MÓDULO 3: Plataforma de Datos (Nivel 3)
+
+Crea el directorio `bioteva-platform/` con esta estructura:
+
+bioteva-platform/
+  app/main.py                 # Streamlit app
+  app/pages/1_Dashboard.py    # Tiempo real IoT + visión
+  app/pages/2_Historico.py    # Gráficas históricas, exportar CSV
+  app/pages/3_Lotes.py        # CRUD lotes, trazabilidad egg→cosecha
+  app/pages/4_Alertas.py      # Log alertas con estado
+  app/pages/5_Prediccion.py   # Yield prediction ML
+  api/main.py                 # FastAPI backend
+  api/routes/sensors.py · batches.py · alerts.py
+  db/models.py                # SQLAlchemy + PostgreSQL
+  db/seed.py                  # Datos de ejemplo
+  docker-compose.yml
+  requirements.txt
+
+La app Streamlit debe:
+- Dashboard con métricas en tiempo real (temperatura, humedad, CO₂ por módulo)
+- Alertas activas con indicador visual (rojo/verde)
+- Tabla de lotes activos con días transcurridos y proyección de cosecha
+- Gráficas con Plotly (tendencias 24h, 7d, 30d)
+- Exportación a Excel con `openpyxl`
+- Login simple con `st.secrets` (usuario y contraseña definidos en st.secrets, nunca en el código)
+
+La predicción de rendimiento debe:
+- Modelo PyTorch simple (3 capas lineales)
+- Features: temp_promedio, hum_promedio, densidad_inicial, dias_transcurridos
+- Output: kg estimados de cosecha
+- Entrenamiento con datos sintéticos de muestra (500 lotes)
+
+---
+
+### MÓDULO 4: Integración y Validación
+
+Crea el directorio `bioteva-integration/` con:
+
+bioteva-integration/
+  scripts/health_check.sh         # Verifica todos los servicios
+  scripts/demo_data_generator.py  # Genera datos de prueba realistas
+  scripts/export_to_sheets.py     # Exporta datos a Google Sheets (opcional)
+  docker-compose.full.yml         # Levanta TODO el sistema junto
+  README_QUICKSTART.md            # Guía de 5 minutos para arrancar
+
+El health check debe verificar:
+- MQTT broker responde en puerto 1883
+- InfluxDB tiene datos de las últimas 2 horas
+- API de visión responde en `/health`
+- Dashboard Streamlit carga sin error
+- Retornar resumen: `✅ 4/4 servicios activos` o lista de fallos
+
+El generador de datos demo debe:
+- Simular 3 módulos de cría con valores realistas
+- Generar variaciones naturales (ciclos día/noche, tendencias)
+- Insertar en InfluxDB + PostgreSQL simultáneamente
+- Incluir eventos de alerta simulados (1 cada 6 horas)
+
+---
+
+## RESTRICCIONES TÉCNICAS
+
+- Python 3.11+
+- Docker y Docker Compose para todos los servicios
+- Toda credencial va en `.env` (nunca hardcodeada)
+- Cada módulo debe tener su propio `README.md` con instrucciones de setup
+- Tests básicos con pytest para la API de visión
+- Código comentado en español
+
+## PROCESO
+
+1. Crea los archivos de cada módulo en orden (1 → 2 → 3 → 4)
+2. Después de cada módulo, dime qué creaste y qué comando ejecutar para probarlo
+3. Si necesitas instalar algo, hazlo con pip o apt
+4. Al final, dame el comando único para levantar TODO el sistema
+
+Empieza con el Módulo 1 ahora.</pre></details>
+    </div></div>
+
+    <div class="panel"><header><h2>Comprobar que cada módulo funciona</h2></header><div class="panel-body col" style="gap:12px">
+      <details class="cal-adv"><summary>Módulo 1 — IoT</summary><pre class="report">cd bioteva-monitor &amp;&amp; docker compose up -d
+docker compose ps
+mosquitto_pub -h localhost -p 1883 -t "bioteva/modulos/M1" -m '{"modulo":"M1","temp":29.5,"hum":65.0,"co2":850}'</pre><p class="muted-text">Qué debes ver: Grafana con 3 paneles (temperatura, humedad, CO₂) actualizándose cada 30 s.</p></details>
+      <details class="cal-adv"><summary>Módulo 2 — Visión</summary><pre class="report">cd bioteva-vision &amp;&amp; docker compose up -d
+curl http://localhost:8001/health
+pytest tests/ -v</pre><p class="muted-text">Qué debes ver: la API responde en menos de 2 s y devuelve el conteo con un health_score entre 0 y 1.</p></details>
+      <details class="cal-adv"><summary>Módulo 3 — Plataforma</summary><pre class="report">cd bioteva-platform &amp;&amp; docker compose up -d
+curl http://localhost:8002/health
+docker compose exec api python db/seed.py</pre><p class="muted-text">Qué debes ver: panel con temperatura en tiempo real, tabla de lotes activos y predicción de rendimiento.</p></details>
+      <details class="cal-adv"><summary>Módulo 4 — Sistema completo</summary><pre class="report">cd bioteva-integration &amp;&amp; bash scripts/health_check.sh
+docker compose -f docker-compose.full.yml up -d</pre><p class="muted-text">Qué debes ver: «✅ 4/4 servicios activos».</p></details>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Servicio</th><th>Dirección (en el equipo donde se instale)</th></tr></thead>
+        <tbody>
+          <tr><td>Grafana</td><td><code>http://localhost:3000</code></td></tr>
+          <tr><td>Node-RED</td><td><code>http://localhost:1880</code></td></tr>
+          <tr><td>API de visión</td><td><code>http://localhost:8001/docs</code></td></tr>
+          <tr><td>API de la plataforma</td><td><code>http://localhost:8002/docs</code></td></tr>
+          <tr><td>Panel Streamlit</td><td><code>http://localhost:8501</code></td></tr>
+          <tr><td>InfluxDB · PostgreSQL</td><td><code>localhost:8086</code> · <code>localhost:5432</code></td></tr>
+        </tbody>
+      </table></div>
+      <p class="muted-text">Usuarios y contraseñas: los defines tú en <code>.env</code>; no se guardan en esta app.</p>
+    </div></div>
+
+    <div class="panel"><header><h2>Siguiente paso después de validar</h2></header><div class="panel-body">
+      <ol class="plan-steps">
+        <li><b>Credenciales reales</b> en <code>.env</code> (reemplazar las de prueba).</li>
+        <li><b>Conectar el hardware</b>: cargar el firmware en el ESP32 y apuntarlo al broker.</li>
+        <li><b>Tomar fotos reales</b> de grillos para el dataset de entrenamiento de YOLOv8.</li>
+        <li><b>Configurar el bot de Telegram</b> (token y chat) para alertas.</li>
+        <li><b>Desplegar en la nube</b> (Railway o Render; el plan gratuito alcanza para el MVP).</li>
+      </ol>
+    </div></div>
+  </section>
+
   <section data-view="ayuda" class="col guide" hidden>
     <div class="panel">
       <header><h2>¿Cómo se usa BioTeva Monitor?</h2></header>
