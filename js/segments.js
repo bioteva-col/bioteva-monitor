@@ -373,7 +373,7 @@
     // franjas de ~el grosor de un trazo (12 % del ancho/alto del dígito)
     var span = vertical ? (box[1] - box[0]) : (box[3] - box[2]);
     var strips = Math.max(3, Math.min(9, Math.round(span / 0.04)));
-    var best = -1;
+    var best = -1, floor = Infinity;
     for (var k = 0; k < strips; k++) {
       var sub = vertical
         ? [box[0] + (span * k) / strips, box[0] + (span * (k + 1)) / strips, box[2] + (box[3] - box[2]) * 0.15, box[3] - (box[3] - box[2]) * 0.15]
@@ -381,9 +381,19 @@
       var vals = regionInk(img, roi, ci, digits, sub, tanSlant, light);
       // mediana de la franja: un trazo real la llena; un borde vecino no
       var m = vals[vals.length >> 1];
+      if (m < floor) floor = m;
+      // Segmento horizontal vs. LÍNEA divisoria del display: la línea sigue de largo por el hueco
+      // entre dígitos; el segmento no. Si el hueco a ambos lados tiene tanta tinta como la franja,
+      // es la línea (en la cámara real convertía el «4» de la humedad en «9», 2026-10-28).
+      if (!vertical) {
+        var gl = regionInk(img, roi, ci, digits, [-0.16, -0.06, sub[2], sub[3]], tanSlant, light);
+        var gr = regionInk(img, roi, ci, digits, [1.06, 1.16, sub[2], sub[3]], tanSlant, light);
+        var gm = Math.min(gl[gl.length >> 1], gr[gr.length >> 1]);
+        if (gm > m - 12) continue;
+      }
       if (m > best) best = m;
     }
-    return best;
+    return best >= 0 ? best : floor; // solo había línea divisoria: el segmento está apagado
   }
 
   var meanOf = function (arr) { var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i]; return arr.length ? s / arr.length : 0; };
@@ -461,6 +471,8 @@
       }
       var ranked = Object.keys(CANONICAL).filter(function (c) {
         if (opts.allow && opts.allow[ci] && opts.allow[ci].indexOf(c) < 0) return false; // p. ej. hora: 1.ª cifra 0–2
+        // «L»/«H» solo si el display muestra LL/HH (fuera de escala); en la segunda pasada, solo cifras
+        if ((c === "L" || c === "H") && opts.allowLetters === false) return false;
         if (c === " ") return !seenVisible;         // blancos solo a la izquierda
         if (c === "-") return !seenVisible;         // signo solo como primer carácter
         return true;
@@ -489,6 +501,12 @@
       text = sign + num.slice(0, num.length - decimals) + "." + num.slice(num.length - decimals);
     } else {
       text = body;
+    }
+
+    // Letras mezcladas con cifras («L1.9», «7H») no existen en el HTC-2: se vuelve a leer solo con
+    // cifras. Solo se aceptan letras cuando TODO el valor lo es (LL.L / HH.H = fuera de escala).
+    if (opts.allowLetters !== false && /[LH]/.test(text) && /\d/.test(text)) {
+      return decodeField(img, roi, Object.assign({}, opts, { allowLetters: false }));
     }
 
     var confVals = out.slice(first).map(function (o) { return o.conf; });
@@ -1799,7 +1817,11 @@
     }
     cands.sort(function (a, b) { return b.sc - a.sc; });
     var kept = [];
-    for (var i = 0; i < cands.length && kept.length < (opts.maxCandidates || 6); i++) {
+    // Con «need» se revisan más candidatos: en la cámara real (2026-10-28) el segundo sensor
+    // quedaba fuera de los 6 primeros (textos de la caja de cartón puntuaban más alto); el bucle
+    // de abajo se detiene apenas encuentra las pantallas buscadas, así que no cuesta de más.
+    var maxCands = opts.maxCandidates || (opts.need ? 24 : 6);
+    for (var i = 0; i < cands.length && kept.length < maxCands; i++) {
       var c = cands[i], cx = c.x + c.w / 2, cy = c.y + c.h / 2;
       // supresión de no-máximos solo entre ventanas de tamaño parecido (una ventana que
       // abarca dos equipos no debe tapar a las de cada equipo)

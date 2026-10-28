@@ -163,6 +163,7 @@
         <p>Dibuja un rectángulo sobre <b>la pantalla gris</b> del sensor <span data-sensor-letter>A</span> (o toca su centro). La app lo ajusta sola a la pantalla.</p>
         <p class="muted-text">Si no lo ves, acerca la cámara o enciende la luz del cuarto.</p>
         <span class="msg" id="calMsg" role="status"></span>
+        <span class="msg good cal-saved" role="status"></span>
         <button class="btn primary big" id="calNext1" type="button">Listo, se ve bien</button>
         <button class="btn" type="button" data-cal="snap">Ajustar de nuevo a la pantalla</button>
         <button class="btn" id="calDetect" type="button">Buscar las pantallas automáticamente</button>
@@ -173,9 +174,16 @@
       <div class="cal-visual">
         <span class="box-label">Lo que ve la app</span>
         <div class="canvas-box rect"><canvas id="rectCanvas" width="480" height="386" aria-label="Pantalla del sensor enderezada con las zonas de lectura"></canvas></div>
+        <p class="hint">¿Un cuadro no cae sobre su número? <b>Arrástralo</b> con el dedo o el mouse hasta encima de los dígitos (desde la esquina inferior derecha cambias su tamaño). Se guarda solo.</p>
+        <div class="row-actions">
+          <button class="btn small" type="button" data-cal="rot-">↺ Girar pantalla −1°</button>
+          <button class="btn small" type="button" data-cal="rot+">↻ Girar pantalla +1°</button>
+          <button class="btn small" type="button" data-slant="-2">⟋ Dígitos −2°</button>
+          <button class="btn small" type="button" data-slant="2">⟋ Dígitos +2°</button>
+        </div>
         <details class="cal-adv">
           <summary>Opciones avanzadas</summary>
-          <p class="hint">Normalmente no hace falta. Para mover a mano una zona de lectura: elige el valor y dibuja su zona en la imagen de arriba.</p>
+          <p class="hint">Normalmente no hace falta. Para dibujar de nuevo una zona de lectura: elige el valor y dibuja un rectángulo en una parte vacía de la imagen de arriba.</p>
           <div class="seg small" role="radiogroup" aria-label="Zona a dibujar" id="calFieldGroup">
             <label><input type="radio" name="calField" value="tempIn" checked /> <span>Temp. cuarto (IN)</span></label>
             <label><input type="radio" name="calField" value="tempOut" /> <span>Temp. caja (OUT)</span></label>
@@ -193,17 +201,19 @@
         <p>Mira la pantalla del sensor y escribe lo que ves. Si algo no coincide, la app se ajusta sola.</p>
         <div class="cmp" id="calCmp">
           <span></span><span class="h">La app lee</span><span class="h">Tú ves</span>
-          <label class="lbl" for="exOut">Temp. caja (OUT)</label><span class="app" id="calApp_tempOut">—</span><input id="exOut" class="big-num" inputmode="decimal" autocomplete="off" />
-          <label class="lbl" for="exIn">Temp. cuarto (IN)</label><span class="app" id="calApp_tempIn">—</span><input id="exIn" class="big-num" inputmode="decimal" autocomplete="off" />
+          <label class="lbl" for="exIn">Temp. arriba (IN)</label><span class="app" id="calApp_tempIn">—</span><input id="exIn" class="big-num" inputmode="decimal" autocomplete="off" />
+          <label class="lbl" for="exOut">Temp. abajo (OUT)</label><span class="app" id="calApp_tempOut">—</span><input id="exOut" class="big-num" inputmode="decimal" autocomplete="off" />
           <label class="lbl" for="exHum">Humedad</label><span class="app" id="calApp_humidity">—</span><input id="exHum" class="big-num" inputmode="numeric" autocomplete="off" />
-          <label class="lbl" for="exTime">Hora</label><span class="app" id="calApp_time">—</span><input id="exTime" class="big-num" autocomplete="off" />
+          <label class="lbl" for="exTime">Hora <small class="muted-text">(opcional)</small></label><span class="app" id="calApp_time">—</span><input id="exTime" class="big-num" autocomplete="off" />
         </div>
         <div class="banner warn" id="calMismatch" hidden></div>
         <span class="msg" id="exMsg" role="status"></span>
+        <span class="msg good cal-saved" role="status"></span>
         <div class="row-actions">
           <button class="btn big" id="calBack2" type="button">Volver a encuadrar</button>
           <button class="btn primary big" id="exFit" type="button" style="flex:1">Ajustar y seguir</button>
         </div>
+        <button class="btn ghost" id="calForce" type="button" hidden>Guardar así y seguir (revisaré la lectura después)</button>
       </div>
     </div>
 

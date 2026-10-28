@@ -506,3 +506,4 @@ ol.cal-progress li[data-calstep], ol.cal-progress li[data-calsensor] { cursor: p
 .plan code { font-family: var(--mono); font-size: .92em; background: var(--surface2); border-radius: 6px; padding: 1px 6px; }
 .plan pre.report code { background: none; padding: 0; }
 .plan details pre.report { margin-top: 10px; }
+.cmp .app.doubt { color: var(--warn-ink); background: var(--warn-bg); font-size: 16px; font-family: var(--sans); display: flex; align-items: center; }

@@ -411,7 +411,7 @@
     // franjas de ~el grosor de un trazo (12 % del ancho/alto del dígito)
     var span = vertical ? (box[1] - box[0]) : (box[3] - box[2]);
     var strips = Math.max(3, Math.min(9, Math.round(span / 0.04)));
-    var best = -1;
+    var best = -1, floor = Infinity;
     for (var k = 0; k < strips; k++) {
       var sub = vertical
         ? [box[0] + (span * k) / strips, box[0] + (span * (k + 1)) / strips, box[2] + (box[3] - box[2]) * 0.15, box[3] - (box[3] - box[2]) * 0.15]
@@ -419,9 +419,19 @@
       var vals = regionInk(img, roi, ci, digits, sub, tanSlant, light);
       // mediana de la franja: un trazo real la llena; un borde vecino no
       var m = vals[vals.length >> 1];
+      if (m < floor) floor = m;
+      // Segmento horizontal vs. LÍNEA divisoria del display: la línea sigue de largo por el hueco
+      // entre dígitos; el segmento no. Si el hueco a ambos lados tiene tanta tinta como la franja,
+      // es la línea (en la cámara real convertía el «4» de la humedad en «9», 2026-10-28).
+      if (!vertical) {
+        var gl = regionInk(img, roi, ci, digits, [-0.16, -0.06, sub[2], sub[3]], tanSlant, light);
+        var gr = regionInk(img, roi, ci, digits, [1.06, 1.16, sub[2], sub[3]], tanSlant, light);
+        var gm = Math.min(gl[gl.length >> 1], gr[gr.length >> 1]);
+        if (gm > m - 12) continue;
+      }
       if (m > best) best = m;
     }
-    return best;
+    return best >= 0 ? best : floor; // solo había línea divisoria: el segmento está apagado
   }
 
   var meanOf = function (arr) { var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i]; return arr.length ? s / arr.length : 0; };
@@ -499,6 +509,8 @@
       }
       var ranked = Object.keys(CANONICAL).filter(function (c) {
         if (opts.allow && opts.allow[ci] && opts.allow[ci].indexOf(c) < 0) return false; // p. ej. hora: 1.ª cifra 0–2
+        // «L»/«H» solo si el display muestra LL/HH (fuera de escala); en la segunda pasada, solo cifras
+        if ((c === "L" || c === "H") && opts.allowLetters === false) return false;
         if (c === " ") return !seenVisible;         // blancos solo a la izquierda
         if (c === "-") return !seenVisible;         // signo solo como primer carácter
         return true;
@@ -527,6 +539,12 @@
       text = sign + num.slice(0, num.length - decimals) + "." + num.slice(num.length - decimals);
     } else {
       text = body;
+    }
+
+    // Letras mezcladas con cifras («L1.9», «7H») no existen en el HTC-2: se vuelve a leer solo con
+    // cifras. Solo se aceptan letras cuando TODO el valor lo es (LL.L / HH.H = fuera de escala).
+    if (opts.allowLetters !== false && /[LH]/.test(text) && /\d/.test(text)) {
+      return decodeField(img, roi, Object.assign({}, opts, { allowLetters: false }));
     }
 
     var confVals = out.slice(first).map(function (o) { return o.conf; });
@@ -1837,7 +1855,11 @@
     }
     cands.sort(function (a, b) { return b.sc - a.sc; });
     var kept = [];
-    for (var i = 0; i < cands.length && kept.length < (opts.maxCandidates || 6); i++) {
+    // Con «need» se revisan más candidatos: en la cámara real (2026-10-28) el segundo sensor
+    // quedaba fuera de los 6 primeros (textos de la caja de cartón puntuaban más alto); el bucle
+    // de abajo se detiene apenas encuentra las pantallas buscadas, así que no cuesta de más.
+    var maxCands = opts.maxCandidates || (opts.need ? 24 : 6);
+    for (var i = 0; i < cands.length && kept.length < maxCands; i++) {
       var c = cands[i], cx = c.x + c.w / 2, cy = c.y + c.h / 2;
       // supresión de no-máximos solo entre ventanas de tamaño parecido (una ventana que
       // abarca dos equipos no debe tapar a las de cada equipo)
@@ -5380,8 +5402,8 @@
     };
     return '<div class="panel" style="margin-top:20px"><header><h2>Últimos registros</h2><div class="spacer"></div><a class="btn ghost small" href="#historico" data-go="historico">Ver historial →</a></header>' +
       (last.length
-        ? '<div class="table-scroll"><table><thead><tr><th>Cuándo</th><th>Caja</th><th>Temp. caja (OUT)</th><th>Temp. cuarto (IN)</th><th>Humedad</th><th>Estado</th></tr></thead><tbody>' +
-          last.map((r) => { const s = sensorById(r.sensorId); return "<tr><td>" + esc(fmtWhen(r.ts)) + (r.source === "simulation" ? ' <span class="tag">simulación</span>' : "") + "</td><td>" + esc(s ? s.name : r.sensorId) + "</td><td>" + cell(r, "tempOut", 1) + " °C</td><td>" + cell(r, "tempIn", 1) + " °C</td><td>" + cell(r, "humidity", 0) + " %</td><td>" + statusChip(r.status) + "</td></tr>"; }).join("") +
+        ? '<div class="table-scroll"><table><thead><tr><th>Cuándo</th><th>Caja</th><th>Temp. IN (arriba)</th><th>Temp. OUT (abajo)</th><th>Humedad</th><th>Estado</th></tr></thead><tbody>' +
+          last.map((r) => { const s = sensorById(r.sensorId); return "<tr><td>" + esc(fmtWhen(r.ts)) + (r.source === "simulation" ? ' <span class="tag">simulación</span>' : "") + "</td><td>" + esc(s ? s.name : r.sensorId) + "</td><td>" + cell(r, "tempIn", 1) + " °C</td><td>" + cell(r, "tempOut", 1) + " °C</td><td>" + cell(r, "humidity", 0) + " %</td><td>" + statusChip(r.status) + "</td></tr>"; }).join("") +
           "</tbody></table></div>"
         : '<div class="panel-body"><p class="muted-text">Aún no hay registros en los últimos 7 días. Toca «▶ Iniciar monitoreo» para empezar a guardar lecturas.</p></div>') +
       "</div>";
@@ -5659,12 +5681,44 @@
     $("#calMsg").textContent = "";
     buildCalTable();
     setCalStep(App.cal.step || 1);
+    // Si ningún sensor está ubicado todavía, la app busca sola las pantallas al abrir la
+    // calibración (una vez por sesión; tarda unos segundos), sin esperar a que la persona lo pida.
+    if (!App.cal.autoTried && App.sensors.filter((x) => x.enabled).every((x) => !x.calibration.accepted)) {
+      App.cal.autoTried = true;
+      calMsg("Buscando las pantallas de los sensores en la imagen…");
+      setTimeout(() => { const b = $("#calDetect"); if (App.view === "calibracion" && b && App.cal.lastFrame && !App.cal.lastFrame.error) b.click(); }, 1500);
+    }
     drawCalibration(true);
   }
 
   // Asistente de calibración por sensor: 1 Encuadra → 2 Compara → 3 Acepta → (siguiente sensor) → listo.
   const CAL_STEPS = ["Encuadra", "Compara", "Acepta"];
-  const CMP_KEYS = [["tempOut", "#exOut", 1], ["tempIn", "#exIn", 1], ["humidity", "#exHum", 0], ["time", "#exTime", null]];
+  // mismo orden que la pantalla del HTC-2: IN arriba, OUT abajo, luego humedad y hora
+  const CMP_KEYS = [["tempIn", "#exIn", 1], ["tempOut", "#exOut", 1], ["humidity", "#exHum", 0], ["time", "#exTime", null]];
+  /** ¿El texto leído tiene forma de valor del HTC-2? (no se aceptan «2.8», «L1.9», «7H»…) */
+  function plausibleRead(k, t) {
+    t = String(t || "").trim();
+    if (k === "time") return /^([01]?\d|2[0-3]):[0-5]\d$/.test(t);
+    if (k === "humidity") return /^\d{2}$/.test(t) && +t >= 5 && +t <= 99;
+    return /^-?\d{1,2}\.\d$/.test(t) && +t >= -10 && +t <= 60 && !/^-?0\d/.test(t) && Math.abs(+t) >= 5;
+  }
+
+  // Autoguardado: todo ajuste de la calibración (pantalla, zonas, inclinación) queda guardado en
+  // el sensor al instante; antes solo se guardaba al terminar los 3 pasos y se perdía al cambiar
+  // de sensor (2026-10-28).
+  let persistTimer = null;
+  function persistDraft() {
+    const s = sensorById(App.cal.sensorId), d = App.cal.draft;
+    if (!s || !d) return;
+    const prev = s.calibration;
+    s.calibration = Object.assign(clone(d), { accepted: prev.accepted || null, reference: d.reference || prev.reference || null });
+    App.prevThumbs[s.id] = null;
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(async () => {
+      await saveSensors();
+      $$(".cal-saved").forEach((el) => (el.textContent = "✓ Ubicación de " + s.name + " guardada (" + fmtHour(Date.now()) + ")"));
+    }, 300);
+  }
 
   function nextUncalibrated(exceptId) { return App.sensors.find((x) => x.enabled && x.id !== exceptId && !x.calibration.accepted); }
 
@@ -5703,7 +5757,7 @@
       const a = App.cal.lastRect;
       $("#calSummary").innerHTML = CMP_KEYS.map(([k, , dec]) => {
         const d = a && a.details[k];
-        return '<div class="kv"><span>' + esc(L.FIELD_LABELS[k]) + '</span><span class="v md">' + esc(d && d.text ? showRead(d.text, dec) : "– –") + "</span></div>";
+        return '<div class="kv"><span>' + esc(L.FIELD_LABELS[k]) + '</span><span class="v md">' + esc(d && plausibleRead(k, d.text) ? showRead(d.text, dec) : k === "time" ? "no se lee" : "– –") + "</span></div>";
       }).join("");
       const next = nextUncalibrated(s.id);
       $("#calSave").textContent = next ? "Aceptar y seguir con " + next.name : "Aceptar y terminar";
@@ -5732,7 +5786,8 @@
     if (!sn) {
       d.quad = normQuad(quadPx, fr.gray.w, fr.gray.h);
       drawCalibration(false);
-      calMsg("No se reconocieron los números de un HTC-2 en esa zona. Puedes ajustar las esquinas a mano, acercar la cámara o mejorar la luz.", "crit");
+      calMsg("No se reconocieron los números de un HTC-2 en esa zona: quedó el recuadro que dibujaste (guardado). Puedes afinar las esquinas a mano, acercar la cámara o mejorar la luz.", "crit");
+      persistDraft();
       return false;
     }
     d.quad = normQuad(sn.quad, fr.gray.w, fr.gray.h);
@@ -5742,6 +5797,7 @@
     drawCalibration(false);
     const r = App.cal.lastRect, txt = r ? ["tempIn", "tempOut", "humidity"].map((k) => r.details[k] ? L.FIELD_LABELS[k] + " " + (r.details[k].text || "∅") : null).filter(Boolean).join(" · ") : "";
     calMsg("Pantalla de " + s.name + " ajustada: " + txt + ". Si se ve bien, toca «Listo, se ve bien».", "good");
+    persistDraft();
     return true;
   }
 
@@ -5809,11 +5865,13 @@
     if (App.cal.step === 2) {
       const bad = [];
       CMP_KEYS.forEach(([k, sel, dec]) => {
-        const d = a.details[k], read = d && d.text ? d.text : "", inp = $(sel);
-        const shown = read ? showRead(read, dec) : "– –";
+        const d = a.details[k], raw = d && d.text ? d.text : "", ok = plausibleRead(k, raw);
+        const read = ok ? raw : "", inp = $(sel);
+        const shown = ok ? showRead(read, dec) : raw ? "no se lee" : "– –";
         const cell = $("#calApp_" + k);
         if (cell.textContent !== shown) cell.textContent = shown;
-        inp.placeholder = read ? showRead(read, dec) : "?";
+        cell.classList.toggle("doubt", !ok);
+        inp.placeholder = ok ? showRead(read, dec) : "escribe";
         const typed = inp.value.trim(), off = typed !== "" && !sameRead(k, typed, read);
         inp.classList.toggle("bad", off);
         if (off) bad.push(L.FIELD_LABELS[k] + ": la app lee «" + (read ? showRead(read, dec) : "nada") + "» y tú ves «" + typed + "»");
@@ -5896,8 +5954,16 @@
   function bindCalibration() {
     const canvas = $("#calCanvas"), rc = $("#rectCanvas");
     $$('input[name="calField"]').forEach((r) => r.addEventListener("change", () => { App.cal.field = r.value; drawCalibration(false); }));
-    $("#calSlant").addEventListener("input", (e) => { App.cal.draft.slantDeg = Number(e.target.value); $("#calSlantOut").textContent = e.target.value + "°"; drawCalibration(false); });
-    $("#calLight").addEventListener("change", (e) => { App.cal.draft.lightSegments = e.target.checked; drawCalibration(false); });
+    $("#calSlant").addEventListener("input", (e) => { App.cal.draft.slantDeg = Number(e.target.value); $("#calSlantOut").textContent = e.target.value + "°"; drawCalibration(false); persistDraft(); });
+    $("#calLight").addEventListener("change", (e) => { App.cal.draft.lightSegments = e.target.checked; drawCalibration(false); persistDraft(); });
+    // inclinación de los dígitos con botones (más fácil que el deslizador)
+    $$("[data-slant]").forEach((b) => b.addEventListener("click", () => {
+      const v = Math.max(-20, Math.min(20, (App.cal.draft.slantDeg || 0) + Number(b.dataset.slant)));
+      App.cal.draft.slantDeg = v; $("#calSlant").value = v; $("#calSlantOut").textContent = v + "°";
+      drawCalibration(false); persistDraft();
+      calMsg("Inclinación de los dígitos: " + v + "°", "good");
+    }));
+    $("#calForce").addEventListener("click", () => { persistDraft(); $("#calForce").hidden = true; setCalStep(3); });
     $("#calFreeze").addEventListener("click", (e) => {
       const lf = App.cal.lastFrame;
       if (App.cal.frozen || !lf || lf.error) App.cal.frozen = null;
@@ -5930,6 +5996,7 @@
           d.quad = transformQuad(d.quad, (p, cx, cy) => ({ x: cx + (p.x - cx) * k, y: cy + (p.y - cy) * k }));
         }
         drawCalibration(false);
+        persistDraft();
       }),
     );
 
@@ -5973,25 +6040,56 @@
       if (dr && dr.mode === "rect" && !dr.moved) fitAtClick(dr.x0, dr.y0);
       else if (dr && dr.mode === "move" && !dr.moved) fitAtClick(dr.x0, dr.y0);
       else if (dr && dr.mode === "rect" && dr.moved) { const fr = App.cal.lastFrame; if (fr && fr.gray) snapDraft(pxQuad(App.cal.draft.quad, fr.gray.w, fr.gray.h)); }
+      // lo que la persona ubicó a mano (esquinas o mover) se respeta y queda guardado
+      if (dr && dr.moved && (dr.mode === "corner" || dr.mode === "move")) { App.cal.snapped = true; persistDraft(); }
+      else if (dr && dr.mode === "corner") persistDraft();
     });
     canvas.addEventListener("pointercancel", end);
 
-    // Región de un campo en la vista rectificada.
+    // Zonas de lectura en la vista rectificada: arrastrar un cuadro lo MUEVE, su esquina inferior
+    // derecha lo AGRANDA o achica, y arrastrar en un espacio vacío dibuja de nuevo la zona elegida.
+    // Todo cambio queda guardado en el sensor al soltar.
     let fdrag = null;
-    rc.addEventListener("pointerdown", (ev) => { const p = canvasPoint(rc, ev); fdrag = { x0: p.x, y0: p.y }; rc.setPointerCapture(ev.pointerId); });
+    const fieldAt = (p, W, H) => {
+      const order = [App.cal.field].concat(L.FIELD_KEYS.filter((k) => k !== App.cal.field)); // la elegida primero
+      for (const k of order) {
+        const f = App.cal.draft.fields[k], x = f.x * W, y = f.y * H, w = f.w * W, h = f.h * H, grip = 14 * p.scale;
+        if (Math.abs(p.x - (x + w)) < grip && Math.abs(p.y - (y + h)) < grip) return { k, mode: "resize" };
+        if (p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h) return { k, mode: "move" };
+      }
+      return null;
+    };
+    rc.addEventListener("pointerdown", (ev) => {
+      const p = canvasPoint(rc, ev), hit = fieldAt(p, rc.width, rc.height);
+      if (hit) { App.cal.field = hit.k; $$('input[name="calField"]').forEach((r) => (r.checked = r.value === hit.k)); }
+      const f = App.cal.draft.fields[App.cal.field];
+      fdrag = { x0: p.x, y0: p.y, mode: hit ? hit.mode : "draw", f0: { x: f.x, y: f.y, w: f.w, h: f.h } };
+      rc.setPointerCapture(ev.pointerId);
+      drawCalibration(false);
+    });
     rc.addEventListener("pointermove", (ev) => {
       if (!fdrag) return;
-      const p = canvasPoint(rc, ev), W = rc.width, H = rc.height;
-      if (Math.abs(p.x - fdrag.x0) < 6 || Math.abs(p.y - fdrag.y0) < 6) return;
-      const f = App.cal.draft.fields[App.cal.field];
-      f.x = Math.max(0, Math.min(fdrag.x0, p.x) / W);
-      f.y = Math.max(0, Math.min(fdrag.y0, p.y) / H);
-      f.w = Math.min(1 - f.x, Math.abs(p.x - fdrag.x0) / W);
-      f.h = Math.min(1 - f.y, Math.abs(p.y - fdrag.y0) / H);
+      const p = canvasPoint(rc, ev), W = rc.width, H = rc.height, f = App.cal.draft.fields[App.cal.field], f0 = fdrag.f0;
+      const dx = (p.x - fdrag.x0) / W, dy = (p.y - fdrag.y0) / H;
+      if (Math.abs(p.x - fdrag.x0) < 3 && Math.abs(p.y - fdrag.y0) < 3) return;
+      fdrag.moved = true;
+      if (fdrag.mode === "move") {
+        f.x = Math.max(0, Math.min(1 - f0.w, f0.x + dx));
+        f.y = Math.max(0, Math.min(1 - f0.h, f0.y + dy));
+      } else if (fdrag.mode === "resize") {
+        f.w = Math.max(0.05, Math.min(1 - f0.x, f0.w + dx));
+        f.h = Math.max(0.05, Math.min(1 - f0.y, f0.h + dy));
+      } else {
+        if (Math.abs(p.x - fdrag.x0) < 6 || Math.abs(p.y - fdrag.y0) < 6) return;
+        f.x = Math.max(0, Math.min(fdrag.x0, p.x) / W);
+        f.y = Math.max(0, Math.min(fdrag.y0, p.y) / H);
+        f.w = Math.min(1 - f.x, Math.abs(p.x - fdrag.x0) / W);
+        f.h = Math.min(1 - f.y, Math.abs(p.y - fdrag.y0) / H);
+      }
       f.enabled = true;
       drawCalibration(false);
     });
-    rc.addEventListener("pointerup", () => (fdrag = null));
+    rc.addEventListener("pointerup", () => { const moved = fdrag && fdrag.moved; fdrag = null; if (moved) { persistDraft(); $("#exMsg").textContent = ""; } });
     rc.addEventListener("pointercancel", () => (fdrag = null));
 
     $("#calTrack").addEventListener("change", (e) => {
@@ -6054,17 +6152,20 @@
       if (!fr || !fr.gray) { msg.textContent = "No hay imagen de la cámara."; msg.className = "msg crit"; return; }
       const want = {}, typedAny = [];
       CMP_KEYS.forEach(([k, sel]) => {
-        const typed = $(sel).value.trim(), read = a && a.details[k] ? a.details[k].text : "";
+        const typed = $(sel).value.trim(), raw = a && a.details[k] ? a.details[k].text : "", read = plausibleRead(k, raw) ? raw : "";
         if (typed && !sameRead(k, typed, read)) typedAny.push(k);
+        // solo se usa como ejemplo lo que la persona escribió o una lectura con forma válida
         const v = typed || read;
         if (v) want[k] = k === "time" ? v.replace(/^0(\d:)/, "$1") : k === "humidity" ? String(parseNum(v) == null ? v : Math.round(parseNum(v))) : String(v).replace(",", ".");
       });
-      if (!typedAny.length) {
-        // sin nada escrito, solo se acepta si la app lee números con forma de valor (no se inventan lecturas)
-        const unread = CMP_KEYS.filter(([k, sel]) => { if ($(sel).value.trim()) return false; const r = a && a.details[k] && a.details[k].text; return k === "time" ? !/^\d{1,2}:\d{2}$/.test(r || "") : parseNum(r) == null; }).map(([k]) => L.FIELD_LABELS[k]);
-        if (!a || unread.length) { msg.textContent = "La app no logra leer: " + (unread.join(", ") || "la pantalla") + ". Escribe lo que ves en el sensor (y la app se ajusta), o vuelve a encuadrar."; msg.className = "msg warn"; return; }
-        return setCalStep(3);
+      // sin nada escrito, solo se acepta si la app lee temperaturas y humedad con forma válida (la hora es opcional)
+      const unread = CMP_KEYS.filter(([k, sel]) => k !== "time" && !$(sel).value.trim() && !(a && a.details[k] && plausibleRead(k, a.details[k].text))).map(([k]) => L.FIELD_LABELS[k]);
+      if (!a || unread.length) {
+        msg.textContent = "La app no logra leer: " + (unread.join(", ") || "la pantalla") + ". Escribe esos valores tal como los ves en el sensor y toca de nuevo «Ajustar y seguir»: la app mueve sola sus cuadros hasta leerlos.";
+        msg.className = "msg warn";
+        if (!typedAny.length) return;
       }
+      if (!typedAny.length) { persistDraft(); return setCalStep(3); }
       msg.textContent = "Ajustando (unos segundos)…"; msg.className = "msg";
       $("#exFit").disabled = true;
       await new Promise((r) => setTimeout(r, 30));
@@ -6073,15 +6174,22 @@
         d.fields = res.fields; d.slantDeg = res.slantDeg;
         $("#calSlant").value = res.slantDeg; $("#calSlantOut").textContent = res.slantDeg + "°";
         drawCalibration(false);
-        const bad = Object.keys(res.result).filter((k) => !res.result[k].ok);
-        if (!bad.length) { toast("Listo: la app ya lee lo mismo que tú."); setCalStep(3); }
-        else { msg.textContent = "Casi: todavía no lee bien " + bad.map((k) => L.FIELD_LABELS[k] + " (lee «" + (res.result[k].text || "nada") + "»)").join(", ") + ". Prueba volver a encuadrar solo la pantalla gris, acercar la cámara o mejorar la luz."; msg.className = "msg warn"; }
+        persistDraft();
+        // la hora es opcional: si solo falla la hora, se sigue igual
+        const bad = Object.keys(res.result).filter((k) => !res.result[k].ok && k !== "time");
+        if (!bad.length) { $("#calForce").hidden = true; toast("Listo: la app ya lee lo mismo que tú."); setCalStep(3); }
+        else {
+          msg.textContent = "Casi: todavía no lee bien " + bad.map((k) => L.FIELD_LABELS[k] + " (lee «" + (res.result[k].text || "nada") + "»)").join(", ") + ". Arrastra ese cuadro encima de su número, gira la pantalla o acerca la cámara, y vuelve a tocar «Ajustar y seguir».";
+          msg.className = "msg warn";
+          $("#calForce").hidden = false;
+        }
       } finally { $("#exFit").disabled = false; }
     });
     $$("#calCmp input").forEach((i) => i.addEventListener("input", () => { i.dataset.touched = "1"; drawCalibration(false); }));
     $("#calNext1").addEventListener("click", () => {
       const fr = App.cal.lastFrame;
       if (!fr || fr.error) return calMsg("No hay imagen de la cámara. Actívala en Ajustes → Lecturas y cámara.", "crit");
+      persistDraft(); // la ubicación de la pantalla queda guardada desde ya
       setCalStep(2);
     });
     $("#calBack2").addEventListener("click", () => setCalStep(1));
