@@ -3440,6 +3440,34 @@
     return items;
   }
 
+  // ─────────────────────────── votación entre fotogramas ───────────────────────────
+
+  /**
+   * Une las lecturas de varios fotogramas del mismo sensor: cada campo toma el texto que más se
+   * repite. Si ese texto no alcanza «minAgree» de los fotogramas, su confianza queda en 35 como
+   * máximo (por debajo de cualquier umbral: lectura dudosa, no se usa como dato).
+   * @param caps [{ fields: { k: { text, confidence } }, ... }] (el último es el de referencia)
+   */
+  function voteCaptures(caps, minAgree) {
+    minAgree = minAgree == null ? 0.6 : minAgree;
+    var last = caps[caps.length - 1], out = Object.assign({}, last), keys = {};
+    out.fields = {};
+    caps.forEach(function (c) { Object.keys(c.fields || {}).forEach(function (k) { keys[k] = 1; }); });
+    Object.keys(keys).forEach(function (k) {
+      var tally = {};
+      caps.forEach(function (c) {
+        var f = c.fields && c.fields[k];
+        if (f && f.text) { var t = (tally[f.text] = tally[f.text] || { n: 0, conf: 0 }); t.n++; t.conf += f.confidence; }
+      });
+      var best = Object.keys(tally).sort(function (a, b) { return tally[b].n - tally[a].n || tally[b].conf - tally[a].conf; })[0];
+      if (best == null) { out.fields[k] = last.fields ? last.fields[k] : undefined; return; }
+      var t = tally[best], agree = t.n / caps.length, conf = t.conf / t.n;
+      out.fields[k] = { text: best, confidence: agree >= minAgree ? conf : Math.min(conf, 35), votes: t.n + "/" + caps.length };
+    });
+    out.votes = caps.length;
+    return out;
+  }
+
   // ─────────────────────────── alertas por EPISODIO ───────────────────────────
   //
   // Muchas alertas iguales seguidas (p. ej. «temperatura sobre el límite» en cada
@@ -3520,6 +3548,7 @@
 
   root.MonLogic = {
     alertEpisodes: alertEpisodes,
+    voteCaptures: voteCaptures,
     actionItems: actionItems,
     minutesOutOfRange: minutesOutOfRange,
     slopePerMin: slopePerMin,
@@ -5091,6 +5120,13 @@
     return new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error("toBlob"))), "image/jpeg", 0.72));
   }
 
+  // Votación entre varios fotogramas (como lector_display.py / AI-on-the-edge): con la cámara se
+  // leen VOTE_FRAMES imágenes seguidas y cada valor es el que más se repite. Un reflejo, un
+  // parpadeo o un fotograma borroso ya no cambian la lectura; si no hay mayoría clara, el valor
+  // queda con confianza baja (no se usa como dato) en vez de registrar uno equivocado.
+  const VOTE_FRAMES = 5, VOTE_GAP_MS = 250, VOTE_MIN = 0.6;
+  const voteCaptures = (caps) => L.voteCaptures(caps, VOTE_MIN);
+
   async function runCycle(reason) {
     if (App.busy) return;
     App.busy = true;
@@ -5099,12 +5135,23 @@
       const active = App.sensors.filter((s) => s.enabled);
       const frames = new Map(active.map((s) => [s.id, grabFrame(s, cache, now, true)]));
       trackFrames((s) => frames.get(s.id));
+      // fotogramas extra para votar (solo cámara: una imagen fija o la simulación no cambian)
+      const extra = new Map(active.map((s) => [s.id, []]));
+      if (S.frameSource === "camera") {
+        for (let i = 1; i < VOTE_FRAMES; i++) {
+          await new Promise((r) => setTimeout(r, VOTE_GAP_MS));
+          const c2 = {};
+          active.forEach((s) => { const f = grabFrame(s, c2, now, true); if (f && !f.error) extra.get(s.id).push(f); });
+        }
+      }
       for (const sensor of active) {
         const fr = frames.get(sensor.id);
         let capture;
         if (!fr || fr.error) capture = { captureStatus: "camera_error", fields: {}, error: (fr && fr.error) || "Sin imagen" };
         else {
+          const more = extra.get(sensor.id).map((f) => analyzeSensor(sensor, f.gray, null, false).capture);
           capture = analyzeSensor(sensor, fr.gray, null, true).capture;
+          if (more.length) capture = voteCaptures(more.concat([capture]));
           capture.cameraLabel = fr.label;
           const tk = App.track.state[sensor.id];
           const readable = Object.keys(capture.fields).some((k) => capture.fields[k] && capture.fields[k].confidence >= 50);

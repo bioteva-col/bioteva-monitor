@@ -1105,6 +1105,34 @@
     return items;
   }
 
+  // ─────────────────────────── votación entre fotogramas ───────────────────────────
+
+  /**
+   * Une las lecturas de varios fotogramas del mismo sensor: cada campo toma el texto que más se
+   * repite. Si ese texto no alcanza «minAgree» de los fotogramas, su confianza queda en 35 como
+   * máximo (por debajo de cualquier umbral: lectura dudosa, no se usa como dato).
+   * @param caps [{ fields: { k: { text, confidence } }, ... }] (el último es el de referencia)
+   */
+  function voteCaptures(caps, minAgree) {
+    minAgree = minAgree == null ? 0.6 : minAgree;
+    var last = caps[caps.length - 1], out = Object.assign({}, last), keys = {};
+    out.fields = {};
+    caps.forEach(function (c) { Object.keys(c.fields || {}).forEach(function (k) { keys[k] = 1; }); });
+    Object.keys(keys).forEach(function (k) {
+      var tally = {};
+      caps.forEach(function (c) {
+        var f = c.fields && c.fields[k];
+        if (f && f.text) { var t = (tally[f.text] = tally[f.text] || { n: 0, conf: 0 }); t.n++; t.conf += f.confidence; }
+      });
+      var best = Object.keys(tally).sort(function (a, b) { return tally[b].n - tally[a].n || tally[b].conf - tally[a].conf; })[0];
+      if (best == null) { out.fields[k] = last.fields ? last.fields[k] : undefined; return; }
+      var t = tally[best], agree = t.n / caps.length, conf = t.conf / t.n;
+      out.fields[k] = { text: best, confidence: agree >= minAgree ? conf : Math.min(conf, 35), votes: t.n + "/" + caps.length };
+    });
+    out.votes = caps.length;
+    return out;
+  }
+
   // ─────────────────────────── alertas por EPISODIO ───────────────────────────
   //
   // Muchas alertas iguales seguidas (p. ej. «temperatura sobre el límite» en cada
@@ -1185,6 +1213,7 @@
 
   root.MonLogic = {
     alertEpisodes: alertEpisodes,
+    voteCaptures: voteCaptures,
     actionItems: actionItems,
     minutesOutOfRange: minutesOutOfRange,
     slopePerMin: slopePerMin,
