@@ -1793,8 +1793,64 @@
    * candidato se encaja con snapHtc2; solo quedan los que dan una lectura plausible.
    * @returns [{ quad (LCD, px), score, area, kind: "dígitos", fields, confidence }] de mejor a peor
    */
+  /**
+   * Con dígitos pequeños cada encaje lee un poco distinto. Se prueban varios encajes de la misma
+   * pantalla y se conserva el que más coincide con la mayoría, valor por valor.
+   */
+  function fineFit(frame, q, first, base, opts) {
+    var c = quadCenter(q), fits = [first];
+    [1.15, 1.3].forEach(function (k) {
+      var sn = snapHtc2(frame, q.map(function (p) { return { x: c.x + (p.x - c.x) * k, y: c.y + (p.y - c.y) * k }; }), base, opts);
+      if (sn && pointInQuad(sn.quad, c)) fits.push(sn);
+    });
+    var reads = fits.map(function (sn) {
+      var l = prepareLcd(frame, sn.quad, 480), o = {};
+      ["tempIn", "tempOut", "humidity"].forEach(function (k) {
+        var f = sn.fields[k];
+        o[k] = decodeField(l.img, { x: f.x * l.size.w, y: f.y * l.size.h, w: f.w * l.size.w, h: f.h * l.size.h }, { digits: f.digits, decimals: f.decimals, slantDeg: sn.slantDeg != null ? sn.slantDeg : 6 }).text;
+      });
+      return o;
+    });
+    var best = 0, bestN = -1;
+    reads.forEach(function (r, i) {
+      var n = 0;
+      reads.forEach(function (o) { Object.keys(r).forEach(function (k) { if (o[k] === r[k]) n++; }); });
+      if (n > bestN) { bestN = n; best = i; }
+    });
+    plausibleHtc2(frame, fits[best]);
+    return fits[best];
+  }
+
+  /**
+   * Búsqueda directa por forma: una pantalla es un rectángulo claro dentro de un marco oscuro
+   * (decenas de ms). Solo se acepta si lo que hay adentro se lee como un HTC-2, así que un cuadro,
+   * una ventana o un cojín no pasan. En la cámara real (nov-2026) encontró las dos pantallas donde
+   * la búsqueda por tinta tardaba 80 s y marcaba objetos de la escena.
+   */
+  function detectHtc2Rect(frame, base, opts) {
+    opts = opts || {};
+    var cands = [], add = function (q) {
+      var c = quadCenter(q);
+      if (!cands.some(function (o) { return pointInQuad(o, c); })) cands.push(q);
+    };
+    detectLcdHoles(frame).forEach(function (c) { add(c.quad); });
+    detectLcds(frame).slice(0, 8).forEach(function (c) { add(c.quad); });
+    var out = [];
+    cands.slice(0, 12).forEach(function (q) {
+      var w = Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y), h = Math.hypot(q[3].x - q[0].x, q[3].y - q[0].y), asp = w / Math.max(1, h);
+      if (asp < HTC2_ASPECT * 0.75 || asp > HTC2_ASPECT * 1.3 || w < frame.w * 0.04) return;
+      var sn = standardFit(frame, q, base, opts, "rectángulo");
+      if (plausibleHtc2(frame, sn) < 2) return;
+      if (opts.fine) sn = fineFit(frame, q, sn, base, opts);
+      out.push({ quad: sn.quad, fields: sn.fields, slantDeg: sn.slantDeg, confidence: sn.confidence, area: quadArea(sn.quad), score: 2000 + (sn.meanConf || 0), kind: "rectángulo" });
+    });
+    return out;
+  }
+
   function detectHtc2(frame, base, opts) {
     opts = opts || {};
+    var seeded = opts.noRect ? [] : detectHtc2Rect(frame, base, opts), t0 = Date.now();
+    if (seeded.length && (!opts.need || seeded.length >= opts.need)) return seeded.sort(function (a, b) { return b.score - a.score; });
     var f = Math.max(1, Math.round(frame.w / (opts.workWidth || 640)));
     var img = downscale(frame, f), W = img.w, H = img.h;
     var ink = dropLines(inkMask(img, Math.max(4, Math.round(W / 60)), opts.lightSegments), W, H, W * 0.06, H * 0.08, 1);
@@ -1828,9 +1884,11 @@
       if (kept.some(function (k) { var r = c.w / k.w; return r > 0.7 && r < 1.45 && Math.abs(cx - (k.x + k.w / 2)) < Math.max(c.w, k.w) * 0.6 && Math.abs(cy - (k.y + k.h / 2)) < Math.max(c.h, k.h) * 0.6; })) continue;
       kept.push(c);
     }
-    var out = [];
+    var out = seeded.slice();
     kept.forEach(function (c) {
       if (opts.need && out.length >= opts.need) return; // ya se encontraron las pantallas buscadas
+      if (opts.budgetMs && Date.now() - t0 > opts.budgetMs) return; // sin tiempo: mejor pedir ayuda que tardar minutos
+      if (out.some(function (o) { return pointInQuad(o.quad, { x: (c.x + c.w / 2) * f, y: (c.y + c.h / 2) * f }); })) return;
       // ventana holgada alrededor del candidato, girada según las filas de dígitos → encaje fino
       // (si no lee los tres valores, se reintenta con una ventana más grande)
       var ang = rowAngle(ink, W, c.x, c.y, c.x + c.w, c.y + c.h), cs = Math.cos(ang), sn0 = Math.sin(ang), sn = null;
@@ -1844,15 +1902,17 @@
       });
       if (!sn || (sn.rank || 0) < 2000) return; // no lee al menos dos valores con forma válida
       // validación: el HTC-2 muestra temperaturas y humedad con forma de número
-      var lcd = prepareLcd(frame, sn.quad, 480), ok = 0, confSum = 0;
+      var lcd = prepareLcd(frame, sn.quad, 480), ok = 0, confSum = 0, temps = [];
       ["tempIn", "tempOut", "humidity"].forEach(function (k) {
         var fl = sn.fields[k];
         if (!fl) return;
         var r = decodeField(lcd.img, { x: fl.x * lcd.size.w, y: fl.y * lcd.size.h, w: fl.w * lcd.size.w, h: fl.h * lcd.size.h }, { digits: fl.digits, decimals: fl.decimals, slantDeg: sn.slantDeg != null ? sn.slantDeg : opts.slantDeg, lightSegments: opts.lightSegments });
         var v = parseFloat(r.text), plausible = (k === "humidity" ? /^[1-9]\d$/.test(r.text) && v >= 5 && v <= 99 : /^-?([1-9]\d|\d)\.\d$/.test(r.text) && !/^-?0\d/.test(r.text) && v >= -20 && v <= 60);
+        if (k !== "humidity") temps.push(v);
         if (plausible && r.confidence >= 30) { ok++; confSum += r.confidence; }
       });
       if (ok < 3) return; // las tres lecturas deben ser plausibles: si no, no es un HTC-2
+      if (Math.abs(temps[0] - temps[1]) > 25) return; // IN y OUT tan distintas: era un objeto de la escena
       if (Math.hypot(sn.quad[1].x - sn.quad[0].x, sn.quad[1].y - sn.quad[0].y) < 70) return; // demasiado chico para leer
       var meanConf = confSum / ok;
       var cc = quadCenter(sn.quad);
@@ -2275,6 +2335,7 @@
     locateHtc2: locateHtc2,
     findHtc2Lcd: findHtc2Lcd,
     detectHtc2: detectHtc2,
+    detectHtc2Rect: detectHtc2Rect,
     rectToFrame: rectToFrame,
     screenScore: screenScore,
     makeTemplate: makeTemplate,

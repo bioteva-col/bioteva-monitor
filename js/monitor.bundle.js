@@ -1831,8 +1831,64 @@
    * candidato se encaja con snapHtc2; solo quedan los que dan una lectura plausible.
    * @returns [{ quad (LCD, px), score, area, kind: "dígitos", fields, confidence }] de mejor a peor
    */
+  /**
+   * Con dígitos pequeños cada encaje lee un poco distinto. Se prueban varios encajes de la misma
+   * pantalla y se conserva el que más coincide con la mayoría, valor por valor.
+   */
+  function fineFit(frame, q, first, base, opts) {
+    var c = quadCenter(q), fits = [first];
+    [1.15, 1.3].forEach(function (k) {
+      var sn = snapHtc2(frame, q.map(function (p) { return { x: c.x + (p.x - c.x) * k, y: c.y + (p.y - c.y) * k }; }), base, opts);
+      if (sn && pointInQuad(sn.quad, c)) fits.push(sn);
+    });
+    var reads = fits.map(function (sn) {
+      var l = prepareLcd(frame, sn.quad, 480), o = {};
+      ["tempIn", "tempOut", "humidity"].forEach(function (k) {
+        var f = sn.fields[k];
+        o[k] = decodeField(l.img, { x: f.x * l.size.w, y: f.y * l.size.h, w: f.w * l.size.w, h: f.h * l.size.h }, { digits: f.digits, decimals: f.decimals, slantDeg: sn.slantDeg != null ? sn.slantDeg : 6 }).text;
+      });
+      return o;
+    });
+    var best = 0, bestN = -1;
+    reads.forEach(function (r, i) {
+      var n = 0;
+      reads.forEach(function (o) { Object.keys(r).forEach(function (k) { if (o[k] === r[k]) n++; }); });
+      if (n > bestN) { bestN = n; best = i; }
+    });
+    plausibleHtc2(frame, fits[best]);
+    return fits[best];
+  }
+
+  /**
+   * Búsqueda directa por forma: una pantalla es un rectángulo claro dentro de un marco oscuro
+   * (decenas de ms). Solo se acepta si lo que hay adentro se lee como un HTC-2, así que un cuadro,
+   * una ventana o un cojín no pasan. En la cámara real (nov-2026) encontró las dos pantallas donde
+   * la búsqueda por tinta tardaba 80 s y marcaba objetos de la escena.
+   */
+  function detectHtc2Rect(frame, base, opts) {
+    opts = opts || {};
+    var cands = [], add = function (q) {
+      var c = quadCenter(q);
+      if (!cands.some(function (o) { return pointInQuad(o, c); })) cands.push(q);
+    };
+    detectLcdHoles(frame).forEach(function (c) { add(c.quad); });
+    detectLcds(frame).slice(0, 8).forEach(function (c) { add(c.quad); });
+    var out = [];
+    cands.slice(0, 12).forEach(function (q) {
+      var w = Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y), h = Math.hypot(q[3].x - q[0].x, q[3].y - q[0].y), asp = w / Math.max(1, h);
+      if (asp < HTC2_ASPECT * 0.75 || asp > HTC2_ASPECT * 1.3 || w < frame.w * 0.04) return;
+      var sn = standardFit(frame, q, base, opts, "rectángulo");
+      if (plausibleHtc2(frame, sn) < 2) return;
+      if (opts.fine) sn = fineFit(frame, q, sn, base, opts);
+      out.push({ quad: sn.quad, fields: sn.fields, slantDeg: sn.slantDeg, confidence: sn.confidence, area: quadArea(sn.quad), score: 2000 + (sn.meanConf || 0), kind: "rectángulo" });
+    });
+    return out;
+  }
+
   function detectHtc2(frame, base, opts) {
     opts = opts || {};
+    var seeded = opts.noRect ? [] : detectHtc2Rect(frame, base, opts), t0 = Date.now();
+    if (seeded.length && (!opts.need || seeded.length >= opts.need)) return seeded.sort(function (a, b) { return b.score - a.score; });
     var f = Math.max(1, Math.round(frame.w / (opts.workWidth || 640)));
     var img = downscale(frame, f), W = img.w, H = img.h;
     var ink = dropLines(inkMask(img, Math.max(4, Math.round(W / 60)), opts.lightSegments), W, H, W * 0.06, H * 0.08, 1);
@@ -1866,9 +1922,11 @@
       if (kept.some(function (k) { var r = c.w / k.w; return r > 0.7 && r < 1.45 && Math.abs(cx - (k.x + k.w / 2)) < Math.max(c.w, k.w) * 0.6 && Math.abs(cy - (k.y + k.h / 2)) < Math.max(c.h, k.h) * 0.6; })) continue;
       kept.push(c);
     }
-    var out = [];
+    var out = seeded.slice();
     kept.forEach(function (c) {
       if (opts.need && out.length >= opts.need) return; // ya se encontraron las pantallas buscadas
+      if (opts.budgetMs && Date.now() - t0 > opts.budgetMs) return; // sin tiempo: mejor pedir ayuda que tardar minutos
+      if (out.some(function (o) { return pointInQuad(o.quad, { x: (c.x + c.w / 2) * f, y: (c.y + c.h / 2) * f }); })) return;
       // ventana holgada alrededor del candidato, girada según las filas de dígitos → encaje fino
       // (si no lee los tres valores, se reintenta con una ventana más grande)
       var ang = rowAngle(ink, W, c.x, c.y, c.x + c.w, c.y + c.h), cs = Math.cos(ang), sn0 = Math.sin(ang), sn = null;
@@ -1882,15 +1940,17 @@
       });
       if (!sn || (sn.rank || 0) < 2000) return; // no lee al menos dos valores con forma válida
       // validación: el HTC-2 muestra temperaturas y humedad con forma de número
-      var lcd = prepareLcd(frame, sn.quad, 480), ok = 0, confSum = 0;
+      var lcd = prepareLcd(frame, sn.quad, 480), ok = 0, confSum = 0, temps = [];
       ["tempIn", "tempOut", "humidity"].forEach(function (k) {
         var fl = sn.fields[k];
         if (!fl) return;
         var r = decodeField(lcd.img, { x: fl.x * lcd.size.w, y: fl.y * lcd.size.h, w: fl.w * lcd.size.w, h: fl.h * lcd.size.h }, { digits: fl.digits, decimals: fl.decimals, slantDeg: sn.slantDeg != null ? sn.slantDeg : opts.slantDeg, lightSegments: opts.lightSegments });
         var v = parseFloat(r.text), plausible = (k === "humidity" ? /^[1-9]\d$/.test(r.text) && v >= 5 && v <= 99 : /^-?([1-9]\d|\d)\.\d$/.test(r.text) && !/^-?0\d/.test(r.text) && v >= -20 && v <= 60);
+        if (k !== "humidity") temps.push(v);
         if (plausible && r.confidence >= 30) { ok++; confSum += r.confidence; }
       });
       if (ok < 3) return; // las tres lecturas deben ser plausibles: si no, no es un HTC-2
+      if (Math.abs(temps[0] - temps[1]) > 25) return; // IN y OUT tan distintas: era un objeto de la escena
       if (Math.hypot(sn.quad[1].x - sn.quad[0].x, sn.quad[1].y - sn.quad[0].y) < 70) return; // demasiado chico para leer
       var meanConf = confSum / ok;
       var cc = quadCenter(sn.quad);
@@ -2313,6 +2373,7 @@
     locateHtc2: locateHtc2,
     findHtc2Lcd: findHtc2Lcd,
     detectHtc2: detectHtc2,
+    detectHtc2Rect: detectHtc2Rect,
     rectToFrame: rectToFrame,
     screenScore: screenScore,
     makeTemplate: makeTemplate,
@@ -5041,21 +5102,27 @@
    * candidatos con dígitos (verificados), nunca camisas, cajas u otros objetos.
    */
   function findScreens(gray, need) {
-    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need };
-    const found = Seg.detectHtc2(gray, base, opts);
-    if (found.length < need) {
-      Seg.detectLcds(gray).forEach((c) => {
-        if (found.some((f) => Seg.pointInQuad(f.quad, Seg.quadCenter(c.quad)))) return;
-        const sn = Seg.snapHtc2(gray, c.quad.map((p, i, q) => { const cc = Seg.quadCenter(q); return { x: cc.x + (p.x - cc.x) * 1.15, y: cc.y + (p.y - cc.y) * 1.15 }; }), base, opts);
-        if (sn && sn.score >= 0.22) found.push({ quad: sn.quad, fields: sn.fields, slantDeg: sn.slantDeg, area: Seg.quadArea(sn.quad), score: sn.score * 1000, kind: "marco" });
-      });
-    }
-    return found.slice(0, 6);
+    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need, budgetMs: 5000 };
+    return Seg.detectHtc2(gray, base, opts).slice(0, 6);
+  }
+
+  /** La misma búsqueda, en segundo plano para no congelar la app (sin Worker, p. ej. file://, en esta hebra). */
+  function findScreensInBackground(gray, need) {
+    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need, fine: true, budgetMs: 15000 };
+    return new Promise((resolve) => {
+      let w;
+      try { w = new Worker("js/detect-worker.js"); } catch (e) { resolve(Seg.detectHtc2(gray, base, opts)); return; }
+      const done = (found) => { clearTimeout(timer); w.terminate(); resolve(found); };
+      const timer = setTimeout(() => done([]), 90000);
+      w.onmessage = (e) => done(e.data.ok ? e.data.found : []);
+      w.onerror = (e) => { e.preventDefault(); done(Seg.detectHtc2(gray, base, opts)); };
+      w.postMessage({ w: gray.w, h: gray.h, d: gray.d, base, opts });
+    });
   }
 
   /** Detecta pantallas en toda la imagen y asigna las que falten (izquierda → A, derecha → B). */
-  function autoAssign(gray, sensors, force) {
-    const found = findScreens(gray, sensors.length);
+  function autoAssign(gray, sensors, force, known) {
+    const found = known || findScreens(gray, sensors.length);
     App.cal.candidates = { list: found, w: gray.w, h: gray.h };
     App.cal.candidatesAt = Date.now();
     const targets = sensors.filter((s) => force || !(s.calibration.track && s.calibration.track.tpl));
@@ -5730,7 +5797,7 @@
     setCalStep(App.cal.step || 1);
     // Si ningún sensor está ubicado todavía, la app busca sola las pantallas al abrir la
     // calibración (una vez por sesión; tarda unos segundos), sin esperar a que la persona lo pida.
-    if (!App.cal.autoTried && App.sensors.filter((x) => x.enabled).every((x) => !x.calibration.accepted)) {
+    if (!App.cal.autoTried && App.sensors.filter((x) => x.enabled).some((x) => !x.calibration.accepted)) {
       App.cal.autoTried = true;
       calMsg("Buscando las pantallas de los sensores en la imagen…");
       setTimeout(() => { const b = $("#calDetect"); if (App.view === "calibracion" && b && App.cal.lastFrame && !App.cal.lastFrame.error) b.click(); }, 1500);
@@ -6145,14 +6212,32 @@
     $("#calDetect").addEventListener("click", async () => {
       const fr = App.cal.lastFrame;
       if (!fr || fr.error) return calMsg("No hay imagen: activa la cámara o elige una fuente en «Cámara».", "crit");
-      calMsg("Buscando pantallas (puede tardar unos segundos)…");
-      await new Promise((r) => setTimeout(r, 30));
-      const res = autoAssign(fr.gray, App.sensors.filter((x) => x.enabled), true);
+      const btn = $("#calDetect"), enabled = App.sensors.filter((x) => x.enabled);
+      btn.disabled = true;
+      $("#calConfirmAll").hidden = true;
+      calMsg("Buscando las pantallas… puedes seguir usando la app.");
+      const gray = fr.gray, found = await findScreensInBackground(gray, enabled.length);
+      btn.disabled = false;
+      if (App.view !== "calibracion") return;
+      // con todas encontradas: izquierda → A, derecha → B. Si falta alguna, solo se mueve el sensor
+      // que se está calibrando: no se asume cuál es cuál ni se desubica el otro.
+      const targets = found.length >= enabled.length ? enabled : enabled.filter((x) => x.id === App.cal.sensorId);
+      const res = autoAssign(gray, targets, true, found.slice(0, targets.length));
       await saveSensors();
       App.cal.draft = null;
       openCalibration();
-      if (!res.found) calMsg("No se detectaron pantallas. Haz clic sobre la pantalla de cada sensor o arrastra un rectángulo alrededor (o acerca la cámara / mejora la luz).", "crit");
-      else calMsg("Se detectaron " + res.found + " pantalla(s) (en amarillo); se asignaron " + res.assigned + ". Revisa las lecturas de cada sensor, usa «Intercambiar A ↔ B» si están al revés y sigue con «Listo, se ve bien».", "good");
+      if (!found.length) return calMsg("No encontré pantallas en esta imagen. Revisa que se vean los sensores y que no haya reflejos, o toca el centro de cada pantalla.", "crit");
+      if (found.length < enabled.length) return calMsg("Encontré solo " + found.length + " pantalla(s). Quedó en " + sensorById(App.cal.sensorId).name + "; para el otro sensor, toca el centro de su pantalla.", "warn");
+      const summary = enabled.map((s) => { const a = analyzeSensor(s, gray, null, false), v = (k) => (a.details[k] && plausibleRead(k, a.details[k].text) ? showRead(a.details[k].text, k !== "humidity") : "– –"); return s.name + ": IN " + v("tempIn") + " · OUT " + v("tempOut") + " · " + v("humidity") + " %"; });
+      calMsg("Encontré las " + res.assigned + " pantallas. " + summary.join(" | ") + ". Si los recuadros están bien, confirma.", "good");
+      $("#calConfirmAll").hidden = false;
+    });
+    $("#calConfirmAll").addEventListener("click", async () => {
+      App.sensors.filter((x) => x.enabled).forEach((s) => { s.calibration.accepted = Date.now(); });
+      await saveSensors();
+      App.cal.draft = null;
+      $("#calConfirmAll").hidden = true;
+      setCalStep("done");
     });
     $("#calSwap").addEventListener("click", async () => {
       const a = sensorById("A").calibration, b = sensorById("B").calibration;

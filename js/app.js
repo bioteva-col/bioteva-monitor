@@ -368,21 +368,27 @@
    * candidatos con dígitos (verificados), nunca camisas, cajas u otros objetos.
    */
   function findScreens(gray, need) {
-    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need };
-    const found = Seg.detectHtc2(gray, base, opts);
-    if (found.length < need) {
-      Seg.detectLcds(gray).forEach((c) => {
-        if (found.some((f) => Seg.pointInQuad(f.quad, Seg.quadCenter(c.quad)))) return;
-        const sn = Seg.snapHtc2(gray, c.quad.map((p, i, q) => { const cc = Seg.quadCenter(q); return { x: cc.x + (p.x - cc.x) * 1.15, y: cc.y + (p.y - cc.y) * 1.15 }; }), base, opts);
-        if (sn && sn.score >= 0.22) found.push({ quad: sn.quad, fields: sn.fields, slantDeg: sn.slantDeg, area: Seg.quadArea(sn.quad), score: sn.score * 1000, kind: "marco" });
-      });
-    }
-    return found.slice(0, 6);
+    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need, budgetMs: 5000 };
+    return Seg.detectHtc2(gray, base, opts).slice(0, 6);
+  }
+
+  /** La misma búsqueda, en segundo plano para no congelar la app (sin Worker, p. ej. file://, en esta hebra). */
+  function findScreensInBackground(gray, need) {
+    const base = App.sensors[0].calibration.fields, opts = { slantDeg: App.sensors[0].calibration.slantDeg, need, fine: true, budgetMs: 15000 };
+    return new Promise((resolve) => {
+      let w;
+      try { w = new Worker("js/detect-worker.js"); } catch (e) { resolve(Seg.detectHtc2(gray, base, opts)); return; }
+      const done = (found) => { clearTimeout(timer); w.terminate(); resolve(found); };
+      const timer = setTimeout(() => done([]), 90000);
+      w.onmessage = (e) => done(e.data.ok ? e.data.found : []);
+      w.onerror = (e) => { e.preventDefault(); done(Seg.detectHtc2(gray, base, opts)); };
+      w.postMessage({ w: gray.w, h: gray.h, d: gray.d, base, opts });
+    });
   }
 
   /** Detecta pantallas en toda la imagen y asigna las que falten (izquierda → A, derecha → B). */
-  function autoAssign(gray, sensors, force) {
-    const found = findScreens(gray, sensors.length);
+  function autoAssign(gray, sensors, force, known) {
+    const found = known || findScreens(gray, sensors.length);
     App.cal.candidates = { list: found, w: gray.w, h: gray.h };
     App.cal.candidatesAt = Date.now();
     const targets = sensors.filter((s) => force || !(s.calibration.track && s.calibration.track.tpl));
@@ -1057,7 +1063,7 @@
     setCalStep(App.cal.step || 1);
     // Si ningún sensor está ubicado todavía, la app busca sola las pantallas al abrir la
     // calibración (una vez por sesión; tarda unos segundos), sin esperar a que la persona lo pida.
-    if (!App.cal.autoTried && App.sensors.filter((x) => x.enabled).every((x) => !x.calibration.accepted)) {
+    if (!App.cal.autoTried && App.sensors.filter((x) => x.enabled).some((x) => !x.calibration.accepted)) {
       App.cal.autoTried = true;
       calMsg("Buscando las pantallas de los sensores en la imagen…");
       setTimeout(() => { const b = $("#calDetect"); if (App.view === "calibracion" && b && App.cal.lastFrame && !App.cal.lastFrame.error) b.click(); }, 1500);
@@ -1472,14 +1478,32 @@
     $("#calDetect").addEventListener("click", async () => {
       const fr = App.cal.lastFrame;
       if (!fr || fr.error) return calMsg("No hay imagen: activa la cámara o elige una fuente en «Cámara».", "crit");
-      calMsg("Buscando pantallas (puede tardar unos segundos)…");
-      await new Promise((r) => setTimeout(r, 30));
-      const res = autoAssign(fr.gray, App.sensors.filter((x) => x.enabled), true);
+      const btn = $("#calDetect"), enabled = App.sensors.filter((x) => x.enabled);
+      btn.disabled = true;
+      $("#calConfirmAll").hidden = true;
+      calMsg("Buscando las pantallas… puedes seguir usando la app.");
+      const gray = fr.gray, found = await findScreensInBackground(gray, enabled.length);
+      btn.disabled = false;
+      if (App.view !== "calibracion") return;
+      // con todas encontradas: izquierda → A, derecha → B. Si falta alguna, solo se mueve el sensor
+      // que se está calibrando: no se asume cuál es cuál ni se desubica el otro.
+      const targets = found.length >= enabled.length ? enabled : enabled.filter((x) => x.id === App.cal.sensorId);
+      const res = autoAssign(gray, targets, true, found.slice(0, targets.length));
       await saveSensors();
       App.cal.draft = null;
       openCalibration();
-      if (!res.found) calMsg("No se detectaron pantallas. Haz clic sobre la pantalla de cada sensor o arrastra un rectángulo alrededor (o acerca la cámara / mejora la luz).", "crit");
-      else calMsg("Se detectaron " + res.found + " pantalla(s) (en amarillo); se asignaron " + res.assigned + ". Revisa las lecturas de cada sensor, usa «Intercambiar A ↔ B» si están al revés y sigue con «Listo, se ve bien».", "good");
+      if (!found.length) return calMsg("No encontré pantallas en esta imagen. Revisa que se vean los sensores y que no haya reflejos, o toca el centro de cada pantalla.", "crit");
+      if (found.length < enabled.length) return calMsg("Encontré solo " + found.length + " pantalla(s). Quedó en " + sensorById(App.cal.sensorId).name + "; para el otro sensor, toca el centro de su pantalla.", "warn");
+      const summary = enabled.map((s) => { const a = analyzeSensor(s, gray, null, false), v = (k) => (a.details[k] && plausibleRead(k, a.details[k].text) ? showRead(a.details[k].text, k !== "humidity") : "– –"); return s.name + ": IN " + v("tempIn") + " · OUT " + v("tempOut") + " · " + v("humidity") + " %"; });
+      calMsg("Encontré las " + res.assigned + " pantallas. " + summary.join(" | ") + ". Si los recuadros están bien, confirma.", "good");
+      $("#calConfirmAll").hidden = false;
+    });
+    $("#calConfirmAll").addEventListener("click", async () => {
+      App.sensors.filter((x) => x.enabled).forEach((s) => { s.calibration.accepted = Date.now(); });
+      await saveSensors();
+      App.cal.draft = null;
+      $("#calConfirmAll").hidden = true;
+      setCalStep("done");
     });
     $("#calSwap").addEventListener("click", async () => {
       const a = sensorById("A").calibration, b = sensorById("B").calibration;

@@ -1,7 +1,7 @@
 /* Service worker de BioTeva Monitor: guarda la app en caché para abrirla sin
    internet (y sin el servidor local) una vez instalada. Los datos no pasan por
    aquí: viven en IndexedDB. Cambia VERSION al publicar archivos nuevos. */
-const VERSION = "bioteva-monitor-v13";
+const VERSION = "bioteva-monitor-v14";
 const ASSETS = [
   "./",
   "index.html",
@@ -9,6 +9,8 @@ const ASSETS = [
   "manifest.webmanifest",
   "js/monitor.bundle.js",
   "js/ticker.js",
+  "js/segments.js",
+  "js/detect-worker.js",
   "icons/icon-32.png",
   "icons/icon-128.png",
   "icons/icon-192.png",
