@@ -578,8 +578,9 @@
 
   function nextIn() {
     if (!App.running || !App.nextAt) return "";
+    // m:ss: siempre el mismo ancho, así la cabecera no se mueve cada segundo
     const s = Math.max(0, Math.round((App.nextAt - Date.now()) / 1000));
-    return s < 60 ? s + " s" : Math.ceil(s / 60) + " min";
+    return Math.floor(s / 60) + ":" + pad2(s % 60);
   }
 
   function renderHeader() {
@@ -749,7 +750,7 @@
       '<div class="box-head"><h2>' + esc(s.name) + (s.enabled ? "" : " (apagado)") + "</h2>" + statusChip(st.code) + "</div>" +
       '<div class="box-body">' +
         '<span class="box-label">' + (ck === "tempOut" ? "Temperatura de la caja (OUT)" : "Temperatura (IN)") + "</span>" +
-        '<div class="hero">' + hero + '<div class="trend">' + (noData ? "" : trendHtml(hourRows, ck, "°C")) + "<span>" + (last ? esc(fmtAgo(last.ts)) : "aún sin lecturas") + (last && last.source === "simulation" ? ' · <span class="tag">simulación</span>' : "") + "</span></div></div>" +
+        '<div class="hero">' + hero + '<div class="trend">' + (noData ? "" : trendHtml(hourRows, ck, "°C")) + "<span>" + (last ? '<span data-ago="' + last.ts + '">' + esc(fmtAgo(last.ts)) + "</span>" : "aún sin lecturas") + (last && last.source === "simulation" ? ' · <span class="tag">simulación</span>' : "") + "</span></div></div>" +
         (noData ? "" : rangeHtml(t.v, s.tempMin, s.tempMax, "°C", 1)) + note +
         '<div class="duo"><div class="kv"><span>Humedad</span>' + kvv(noData ? {} : h, "%", 0, outOf(h.v, s.humMin, s.humMax)) + '<span class="s">' + esc(humLim) + "</span></div>" +
         '<div class="kv"><span>' + (other === "tempIn" ? "Temp. del cuarto (IN)" : "Temp. de la caja (OUT)") + "</span>" + kvv(noData ? {} : o, "°C", 1, false) + "</div></div>" +
@@ -834,14 +835,18 @@
       '<div class="col" style="gap:6px"><b>' + esc(srcTxt) + '</b><span class="muted-text">Lee cada ' + esc(intervalLabel(S.intervalSec)) + ' · próxima: <b id="dashNext">' + esc(App.running ? nextIn() || "ahora" : "detenido") + "</b></span>" +
       '<div class="row-actions"><button class="btn small" type="button" id="dashNow">Leer ahora</button><a class="btn ghost small" href="#calibracion" data-go="calibracion">Calibrar</a></div></div></div></div></div>';
 
+    // redibujo sin saltos: se conserva la altura y el desplazamiento mientras se reemplaza el contenido
+    const keepH = host.offsetHeight, keepY = window.scrollY;
+    if (keepH) host.style.minHeight = keepH + "px";
     host.innerHTML =
       '<div class="home"><div class="boxes">' + cards.join("") + "</div>" + todoHtml + "</div>" +
       '<div class="trio">' +
         '<div class="panel"><header><h2>Hoy en resumen</h2></header><div class="panel-body col">' + (resumen.join("") || '<p class="muted-text">No hay sensores activos.</p>') +
           '<button class="btn small" id="askToday" type="button">¿Hubo cambios importantes hoy?</button><div id="todayAnswer" class="answer" hidden></div></div></div>' +
         lampsHtml + camHtml +
-      "</div>" + lastRecordsHtml(await App.store.readingsRange(now - 7 * DAY, now));
+      "</div>" + lastRecordsHtml(recent3h.length >= 12 ? recent3h : today.length >= 12 ? today : await App.store.readingsRange(now - 2 * DAY, now));
 
+    requestAnimationFrame(() => { host.style.minHeight = ""; if (Math.abs(window.scrollY - keepY) > 2) window.scrollTo(0, keepY); });
     $$("[data-caja]", host).forEach((b) => b.addEventListener("click", () => { App.caja.sensor = b.dataset.caja; App.caja.period = "today"; showView("caja"); }));
     $$("[data-act]", host).forEach((btn) => btn.addEventListener("click", () => {
       const b = actButton(todo[Number(btn.dataset.act)]);
@@ -2415,7 +2420,7 @@
     let rz;
     window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (App.view === "graficas") renderCharts(); }, 250); });
     // cada minuto se refrescan los «hace X min» de Inicio (sin tocar formularios)
-    setInterval(() => { if (App.view === "dashboard" && !document.hidden) renderDashboard(); }, 60000);
+    setInterval(() => { if (document.hidden) return; $$("[data-ago]").forEach((el) => { const t = fmtAgo(Number(el.dataset.ago)); if (el.textContent !== t) el.textContent = t; }); }, 30000);
 
     bindCameraView();
     bindCalibration();
