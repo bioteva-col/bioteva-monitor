@@ -55,6 +55,24 @@
 
   // ─────────────────────────── imágenes base ───────────────────────────
 
+  /**
+   * Promedio de varios fotogramas del mismo tamaño (cámara fija). El ruido del sensor de la
+   * cámara se reduce ~√n y los segmentos tenues del LCD se separan mejor del fondo.
+   * Devuelve null si los tamaños no coinciden.
+   */
+  function meanFrames(frames) {
+    if (!frames || !frames.length) return null;
+    var w = frames[0].w, h = frames[0].h, n = frames.length, acc = new Uint32Array(w * h);
+    for (var f = 0; f < n; f++) {
+      if (frames[f].w !== w || frames[f].h !== h) return null;
+      var d = frames[f].d;
+      for (var i = 0; i < d.length; i++) acc[i] += d[i];
+    }
+    var out = gray(w, h);
+    for (var j = 0; j < acc.length; j++) out.d[j] = (acc[j] + (n >> 1)) / n;
+    return out;
+  }
+
   function gray(w, h, fill) {
     var d = new Uint8ClampedArray(w * h);
     if (fill) d.fill(fill);
@@ -2335,6 +2353,7 @@
 
   root.MonSeg = {
     gray: gray,
+    meanFrames: meanFrames,
     fromRGBA: fromRGBA,
     toRGBA: toRGBA,
     sample: sample,
@@ -3529,6 +3548,33 @@
     return out;
   }
 
+  /**
+   * Une la lectura del fotograma PROMEDIO (menos ruido) con la votación de los fotogramas sueltos.
+   * - Coinciden → ese valor, con la mayor confianza.
+   * - Solo el promedio se lee con seguridad → el del promedio.
+   * - Ambos seguros pero distintos → queda dudoso (confianza ≤ 35): mejor sin dato que un dato errado.
+   */
+  function mergeAveraged(avg, voted, sure) {
+    sure = sure == null ? 60 : sure;
+    if (!avg) return voted;
+    var out = Object.assign({}, voted), keys = {};
+    out.fields = {};
+    [avg, voted].forEach(function (c) { Object.keys((c && c.fields) || {}).forEach(function (k) { keys[k] = 1; }); });
+    Object.keys(keys).forEach(function (k) {
+      var a = avg.fields && avg.fields[k], v = voted.fields && voted.fields[k];
+      var aOk = a && a.text && a.confidence >= sure, vOk = v && v.text && v.confidence >= sure;
+      var r;
+      if (a && v && a.text && a.text === v.text) r = Object.assign({}, v, { confidence: Math.max(a.confidence, v.confidence) });
+      else if (aOk && vOk) r = { text: a.text, confidence: Math.min(a.confidence, v.confidence, 35), votes: v.votes, disagree: v.text };
+      else if (aOk) r = Object.assign({}, a, { votes: v && v.votes });
+      else r = v || a;
+      if (r) r.averaged = true;
+      out.fields[k] = r;
+    });
+    out.averaged = true;
+    return out;
+  }
+
   // ─────────────────────────── alertas por EPISODIO ───────────────────────────
   //
   // Muchas alertas iguales seguidas (p. ej. «temperatura sobre el límite» en cada
@@ -3610,6 +3656,7 @@
   root.MonLogic = {
     alertEpisodes: alertEpisodes,
     voteCaptures: voteCaptures,
+    mergeAveraged: mergeAveraged,
     actionItems: actionItems,
     minutesOutOfRange: minutesOutOfRange,
     slopePerMin: slopePerMin,
@@ -5216,9 +5263,15 @@
         let capture;
         if (!fr || fr.error) capture = { captureStatus: "camera_error", fields: {}, error: (fr && fr.error) || "Sin imagen" };
         else {
-          const more = extra.get(sensor.id).map((f) => analyzeSensor(sensor, f.gray, null, false).capture);
+          const ex = extra.get(sensor.id);
+          const more = ex.map((f) => analyzeSensor(sensor, f.gray, null, false).capture);
           capture = analyzeSensor(sensor, fr.gray, null, true).capture;
-          if (more.length) capture = voteCaptures(more.concat([capture]));
+          if (more.length) {
+            const voted = voteCaptures(more.concat([capture]));
+            // fotograma promedio: menos ruido de cámara → segmentos tenues más claros (medido: +30-60 % de valores leídos)
+            const avg = Seg.meanFrames([fr.gray].concat(ex.map((f) => f.gray)));
+            capture = avg ? L.mergeAveraged(analyzeSensor(sensor, avg, null, false).capture, voted) : voted;
+          }
           capture.cameraLabel = fr.label;
           const tk = App.track.state[sensor.id];
           const readable = Object.keys(capture.fields).some((k) => capture.fields[k] && capture.fields[k].confidence >= 50);

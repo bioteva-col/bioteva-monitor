@@ -1133,6 +1133,33 @@
     return out;
   }
 
+  /**
+   * Une la lectura del fotograma PROMEDIO (menos ruido) con la votación de los fotogramas sueltos.
+   * - Coinciden → ese valor, con la mayor confianza.
+   * - Solo el promedio se lee con seguridad → el del promedio.
+   * - Ambos seguros pero distintos → queda dudoso (confianza ≤ 35): mejor sin dato que un dato errado.
+   */
+  function mergeAveraged(avg, voted, sure) {
+    sure = sure == null ? 60 : sure;
+    if (!avg) return voted;
+    var out = Object.assign({}, voted), keys = {};
+    out.fields = {};
+    [avg, voted].forEach(function (c) { Object.keys((c && c.fields) || {}).forEach(function (k) { keys[k] = 1; }); });
+    Object.keys(keys).forEach(function (k) {
+      var a = avg.fields && avg.fields[k], v = voted.fields && voted.fields[k];
+      var aOk = a && a.text && a.confidence >= sure, vOk = v && v.text && v.confidence >= sure;
+      var r;
+      if (a && v && a.text && a.text === v.text) r = Object.assign({}, v, { confidence: Math.max(a.confidence, v.confidence) });
+      else if (aOk && vOk) r = { text: a.text, confidence: Math.min(a.confidence, v.confidence, 35), votes: v.votes, disagree: v.text };
+      else if (aOk) r = Object.assign({}, a, { votes: v && v.votes });
+      else r = v || a;
+      if (r) r.averaged = true;
+      out.fields[k] = r;
+    });
+    out.averaged = true;
+    return out;
+  }
+
   // ─────────────────────────── alertas por EPISODIO ───────────────────────────
   //
   // Muchas alertas iguales seguidas (p. ej. «temperatura sobre el límite» en cada
@@ -1214,6 +1241,7 @@
   root.MonLogic = {
     alertEpisodes: alertEpisodes,
     voteCaptures: voteCaptures,
+    mergeAveraged: mergeAveraged,
     actionItems: actionItems,
     minutesOutOfRange: minutesOutOfRange,
     slopePerMin: slopePerMin,

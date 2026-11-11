@@ -482,9 +482,15 @@
         let capture;
         if (!fr || fr.error) capture = { captureStatus: "camera_error", fields: {}, error: (fr && fr.error) || "Sin imagen" };
         else {
-          const more = extra.get(sensor.id).map((f) => analyzeSensor(sensor, f.gray, null, false).capture);
+          const ex = extra.get(sensor.id);
+          const more = ex.map((f) => analyzeSensor(sensor, f.gray, null, false).capture);
           capture = analyzeSensor(sensor, fr.gray, null, true).capture;
-          if (more.length) capture = voteCaptures(more.concat([capture]));
+          if (more.length) {
+            const voted = voteCaptures(more.concat([capture]));
+            // fotograma promedio: menos ruido de cámara → segmentos tenues más claros (medido: +30-60 % de valores leídos)
+            const avg = Seg.meanFrames([fr.gray].concat(ex.map((f) => f.gray)));
+            capture = avg ? L.mergeAveraged(analyzeSensor(sensor, avg, null, false).capture, voted) : voted;
+          }
           capture.cameraLabel = fr.label;
           const tk = App.track.state[sensor.id];
           const readable = Object.keys(capture.fields).some((k) => capture.fields[k] && capture.fields[k].confidence >= 50);

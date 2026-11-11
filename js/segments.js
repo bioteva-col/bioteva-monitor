@@ -17,6 +17,24 @@
 
   // ─────────────────────────── imágenes base ───────────────────────────
 
+  /**
+   * Promedio de varios fotogramas del mismo tamaño (cámara fija). El ruido del sensor de la
+   * cámara se reduce ~√n y los segmentos tenues del LCD se separan mejor del fondo.
+   * Devuelve null si los tamaños no coinciden.
+   */
+  function meanFrames(frames) {
+    if (!frames || !frames.length) return null;
+    var w = frames[0].w, h = frames[0].h, n = frames.length, acc = new Uint32Array(w * h);
+    for (var f = 0; f < n; f++) {
+      if (frames[f].w !== w || frames[f].h !== h) return null;
+      var d = frames[f].d;
+      for (var i = 0; i < d.length; i++) acc[i] += d[i];
+    }
+    var out = gray(w, h);
+    for (var j = 0; j < acc.length; j++) out.d[j] = (acc[j] + (n >> 1)) / n;
+    return out;
+  }
+
   function gray(w, h, fill) {
     var d = new Uint8ClampedArray(w * h);
     if (fill) d.fill(fill);
@@ -2297,6 +2315,7 @@
 
   root.MonSeg = {
     gray: gray,
+    meanFrames: meanFrames,
     fromRGBA: fromRGBA,
     toRGBA: toRGBA,
     sample: sample,
