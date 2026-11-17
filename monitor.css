@@ -528,3 +528,11 @@ ol.cal-progress li[data-calstep], ol.cal-progress li[data-calsensor] { cursor: p
 .home-charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 22px; }
 .hc-title { margin: 0; font-size: 16px; }
 @media (max-width: 760px) { .hero-pair .hero-num { font-size: 46px; } .home-charts-grid { grid-template-columns: 1fr; } }
+
+/* ── v19: qué es IN/OUT, hora de la lectura, versión, tabla por hora ── */
+.hero-what { font-size: 12px; line-height: 1.3; color: var(--muted); }
+.read-when { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.ver-badge { font-size: 11px; font-weight: 700; margin-left: 6px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); align-self: center; }
+.hour-table summary { cursor: pointer; font-weight: 600; margin-top: 6px; }
+.hour-table table { font-size: 13px; }
+.crit-text { color: var(--crit, #b3261e); }

@@ -111,6 +111,61 @@
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
+  // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
+  const APP_VERSION = "v19", APP_DATE = "17-nov-2026";
+  const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
+  const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+  /**
+   * Copia de seguridad en una CARPETA DEL COMPUTADOR (vía el servicio local de las lámparas):
+   * respaldo completo (JSON, se restaura en la app) + Excel de los últimos 30 días para revisar las
+   * lecturas. No depende del navegador: sobrevive a actualizaciones, reinstalaciones o a borrar Chrome.
+   */
+  async function saveBackupToPc(reason) {
+    const now = Date.now(), data = await App.store.exportBackup();
+    data.appVersion = APP_VERSION; data.reason = reason;
+    const from = now - 30 * DAY;
+    const rs = data.readings.filter((r) => r.ts >= from).sort((a, b) => a.ts - b.ts || (a.sensorId < b.sensorId ? -1 : 1));
+    const es = data.events.filter((e) => e.ts >= from).sort((a, b) => a.ts - b.ts);
+    const base = "bioteva-monitor_" + stamp() + "_" + String(reason).replace(/[^\w-]/g, "");
+    const files = [{ name: base + ".json", text: JSON.stringify(data) }];
+    try { files.push({ name: base + ".xlsx", base64: u8ToB64(new Uint8Array(await buildWorkbook(rs, es, App.sensors, App.settings, from, now))) }); } catch (e) { /* sin Excel: queda el JSON */ }
+    const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 60000);
+    try {
+      const r = await fetch(BACKUP_URL, { method: "POST", headers: { "content-type": "application/json", "x-bioteva": "1" }, body: JSON.stringify({ files }), signal: ctl.signal });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      const info = { ts: now, reason, dir: j.dir, files: j.saved, readings: data.readings.length };
+      await App.store.setKV("lastPcBackup", info);
+      App.backupError = null;
+      return info;
+    } catch (e) {
+      throw new Error(e.name === "AbortError" ? "tardó demasiado" : /fetch/i.test(e.message) ? "el servicio local (puerto 4479) no responde" : e.message);
+    } finally { clearTimeout(to); }
+  }
+  /** Una copia al día (y al actualizar la versión). Si el servicio local no está, lo reintenta luego. */
+  async function autoBackupCheck(reason) {
+    try {
+      const last = await App.store.getKV("lastPcBackup");
+      if (!reason && last && L.dayKey(last.ts) === L.dayKey(Date.now())) return;
+      if ((await App.store.countReadings()) === 0) return;
+      await saveBackupToPc(reason || "diario");
+    } catch (e) { App.backupError = e.message; }
+  }
+  /** Registra el cambio de versión y avisa que las lecturas siguen ahí. */
+  async function checkVersion() {
+    const prev = await App.store.getKV("appVersion");
+    if (prev === APP_VERSION) return;
+    const n = await App.store.countReadings();
+    const hist = (await App.store.getKV("versionHistory")) || [];
+    hist.push({ v: APP_VERSION, from: prev || null, ts: Date.now(), readings: n });
+    await App.store.setKV("versionHistory", hist.slice(-50));
+    await App.store.setKV("appVersion", APP_VERSION);
+    if (n > 0) {
+      toast("BioTeva Monitor se actualizó a la versión " + APP_VERSION + (prev ? " (antes " + prev + ")" : "") + ". Tus " + n.toLocaleString("es-CO") + " lecturas siguen guardadas.");
+      setTimeout(async () => { await autoBackupCheck("actualizacion-" + APP_VERSION); if (App.backupError) toast("No se pudo guardar la copia automática en el computador (" + App.backupError + "). Puedes descargarla en Ajustes → Datos y conexiones → Crear copia.", "warn"); }, 8000);
+    }
+  }
+
   function stamp() { const d = new Date(); return L.dayKey(d.getTime()) + "_" + pad2(d.getHours()) + pad2(d.getMinutes()); }
 
   async function saveSettings(patch) {
@@ -316,16 +371,18 @@
   function analyzeSensor(sensor, gray, cal, updateThumb) {
     cal = cal || sensor.calibration;
     const q = quadPx(cal, gray.w, gray.h);
-    const lcd = Seg.prepareLcd(gray, q, 480);
+    // Lectura tolerante a una pequeña inclinación del sensor: los campos dudosos se releen girando el cuadro.
+    const enabledFields = {};
+    L.FIELD_KEYS.forEach((key) => { const f = cal.fields[key]; if (f && f.enabled) enabledFields[key] = f; });
+    const rd = Seg.readLcd(gray, q, enabledFields, { slantDeg: cal.slantDeg, lightSegments: cal.lightSegments });
+    const lcd = rd.lcd;
     const size = lcd.size, raw = lcd.raw, clean = lcd.img;
     const fields = {}, details = {};
     const contrast = lcd.contrast; // contraste REAL del LCD (sirve para detectar pantalla apagada)
-    L.FIELD_KEYS.forEach((key) => {
-      const f = cal.fields[key];
-      if (!f || !f.enabled) return;
-      const roi = { x: f.x * size.w, y: f.y * size.h, w: f.w * size.w, h: f.h * size.h };
-      const r = Seg.decodeField(clean, roi, { digits: f.digits, decimals: f.decimals, slantDeg: cal.slantDeg, lightSegments: cal.lightSegments, format: key === "time" ? "time" : "number" });
+    Object.keys(rd.results).forEach((key) => {
+      const r = rd.results[key];
       fields[key] = { text: r.text, confidence: r.confidence, alts: r.alts || [] };
+      if (rd.angle[key]) fields[key].tiltDeg = rd.angle[key];
       details[key] = r;
     });
     const thumb = Seg.thumbnail(raw);
@@ -751,8 +808,12 @@
       : x.v == null ? '<span class="hero-num struck" title="Lectura dudosa: no se usa">' + fmt(x.doubt) + "<small>°C</small></span>"
       : '<span class="hero-num' + (crit ? " crit" : "") + '">' + fmt(x.v) + "<small>°C</small></span>";
     const vIn = ck === "tempIn" ? t : o, vOut = ck === "tempOut" ? t : o;
-    const cell = (key, x, label) => '<div class="hero-cell' + (key === ck ? " ctl" : "") + '"><span class="box-label">' + label + (key === ck ? ' <em class="ctl-tag">controla</em>' : "") + "</span>" + bigNum(x, key === ck && tOut) + "</div>";
-    const hero = '<div class="hero-pair">' + cell("tempIn", vIn, "Temp. del cuarto (IN)") + cell("tempOut", vOut, "Temp. de la caja (OUT)") + "</div>";
+    const cell = (key, x, label, what) => '<div class="hero-cell' + (key === ck ? " ctl" : "") + '"><span class="box-label">' + label + (key === ck ? ' <em class="ctl-tag">controla</em>' : "") + "</span>" + bigNum(x, key === ck && tOut) + '<span class="hero-what">' + what + "</span></div>";
+    const hero = '<div class="hero-pair">' +
+      cell("tempIn", vIn, "IN · interior del aparato", "Sensor dentro del termohigrómetro: mide el aire donde está la pantalla (el cuarto).") +
+      cell("tempOut", vOut, "OUT · sonda del cable", "Punta del cable: mide donde esté puesta (dentro de la caja).") + "</div>";
+    const clock = (ts) => new Date(ts).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit", hour12: false });
+    const when = last ? '<p class="read-when">🕒 Lectura de las <b>' + esc(clock(last.ts)) + "</b> · IN, OUT y humedad salen de la <b>misma foto</b>, a la misma hora" + (last.displayTime ? " · reloj del sensor: " + esc(last.displayTime) : "") + "</p>" : "";
     const diff = !noData && vIn.v != null && vOut.v != null ? vOut.v - vIn.v : null;
     let note = "";
     if (noData) note = '<p class="range-note off">' + esc(st.note || "Sin lecturas") + "</p>";
@@ -771,11 +832,11 @@
     return '<article class="box ' + ui.box + '">' +
       '<div class="box-head"><h2>' + esc(s.name) + (s.enabled ? "" : " (apagado)") + "</h2>" + statusChip(st.code) + "</div>" +
       '<div class="box-body">' +
-        hero +
+        hero + when +
         '<div class="trend row">' + (noData ? "" : trendHtml(hourRows, ck, "°C")) + "<span>" + (last ? '<span data-ago="' + last.ts + '">' + esc(fmtAgo(last.ts)) + "</span>" : "aún sin lecturas") + (last && last.source === "simulation" ? ' · <span class="tag">simulación</span>' : "") + "</span></div>" +
         (noData ? "" : rangeHtml(t.v, s.tempMin, s.tempMax, "°C", 1)) + note +
-        '<div class="duo"><div class="kv"><span>Humedad</span>' + kvv(noData ? {} : h, "%", 0, outOf(h.v, s.humMin, s.humMax)) + '<span class="s">' + esc(humLim) + "</span></div>" +
-        '<div class="kv"><span>Diferencia OUT − IN</span>' + (diff == null ? '<span class="v md">– –</span>' : '<span class="v md">' + (diff > 0 ? "+" : diff < 0 ? "−" : "") + fmt(Math.abs(diff)) + " °C</span>") + '<span class="s">' + (diff == null ? "falta una lectura" : diff > 0.05 ? "la caja está más caliente que el cuarto" : diff < -0.05 ? "la caja está más fría que el cuarto" : "caja y cuarto iguales") + "</span></div></div>" +
+        '<div class="duo"><div class="kv"><span>Humedad (la mide el aparato, lado IN)</span>' + kvv(noData ? {} : h, "%", 0, outOf(h.v, s.humMin, s.humMax)) + '<span class="s">' + esc(humLim) + "</span></div>" +
+        '<div class="kv"><span>Diferencia OUT − IN</span>' + (diff == null ? '<span class="v md">– –</span>' : '<span class="v md">' + (diff > 0 ? "+" : diff < 0 ? "−" : "") + fmt(Math.abs(diff)) + " °C</span>") + '<span class="s">' + (diff == null ? "falta una lectura" : diff > 0.05 ? "OUT (sonda) más caliente que IN (aparato)" : diff < -0.05 ? "OUT (sonda) más fría que IN (aparato)" : "OUT e IN iguales") + "</span></div></div>" +
         lampLine(thermalBoxFor(s.id)) +
       "</div>" +
       '<button class="box-foot" type="button" data-caja="' + esc(s.id) + '">Ver gráfica de hoy <span aria-hidden="true">→</span></button>' +
@@ -805,7 +866,7 @@
     };
     return '<div class="panel" style="margin-top:20px"><header><h2>Últimos registros</h2><div class="spacer"></div><a class="btn ghost small" href="#historico" data-go="historico">Ver historial →</a></header>' +
       (last.length
-        ? '<div class="table-scroll"><table><thead><tr><th>Cuándo</th><th>Caja</th><th>Temp. IN (arriba)</th><th>Temp. OUT (abajo)</th><th>Humedad</th><th>Estado</th></tr></thead><tbody>' +
+        ? '<div class="table-scroll"><table><thead><tr><th>Cuándo</th><th>Caja</th><th>IN · aparato (°C)</th><th>OUT · sonda (°C)</th><th>Humedad</th><th>Estado</th></tr></thead><tbody>' +
           last.map((r) => { const s = sensorById(r.sensorId); return "<tr><td>" + esc(fmtWhen(r.ts)) + (r.source === "simulation" ? ' <span class="tag">simulación</span>' : "") + "</td><td>" + esc(s ? s.name : r.sensorId) + "</td><td>" + cell(r, "tempIn", 1) + " °C</td><td>" + cell(r, "tempOut", 1) + " °C</td><td>" + cell(r, "humidity", 0) + " %</td><td>" + statusChip(r.status) + "</td></tr>"; }).join("") +
           "</tbody></table></div>"
         : '<div class="panel-body"><p class="muted-text">Aún no hay registros en los últimos 7 días. Toca «▶ Iniciar monitoreo» para empezar a guardar lecturas.</p></div>') +
@@ -853,13 +914,43 @@
     const ser = (sid, k) => L.series(gRows, sid, k, gFrom, now, 400).map((p) => ({ t: p.t, v: p.v }));
     const chartsHtml = '<div class="panel home-charts"><header><h2>Gráficas · ' + (gFrom < dayStart ? "últimas 6 horas" : "hoy") + '</h2><div class="spacer"></div><a class="btn ghost small" href="#graficas" data-go="graficas">Más periodos →</a></header><div class="panel-body home-charts-grid">' +
       App.sensors.filter((s) => s.enabled).map((s) => {
-        const ck = L.controlKey(s), oth = ck === "tempOut" ? "tempIn" : "tempOut", lab = (k) => (k === "tempOut" ? "OUT · caja" : "IN · cuarto");
+        const ck = L.controlKey(s), oth = ck === "tempOut" ? "tempIn" : "tempOut", lab = (k) => (k === "tempOut" ? "OUT · sonda (caja)" : "IN · aparato (cuarto)");
         return '<div class="col"><h3 class="hc-title">' + esc(s.name) + "</h3>" +
           '<div class="legend"><span><i class="lg-line"></i>' + lab(ck) + '</span><span><i class="lg-dash"></i>' + lab(oth) + "</span>" + (s.tempMin != null && s.tempMax != null ? '<span><i class="lg-zone"></i>Tus límites</span>' : "") + "</div>" +
           boxChartSvg({ id: "g" + s.id, pts: ser(s.id, ck), cmp: ser(s.id, oth), from: gFrom, to: now, mn: s.tempMin, mx: s.tempMax, unit: "°C", dec: 1, gapMs: gGap, minSpan: 2, h: 240, label: "Temperatura IN y OUT de " + s.name }) +
           '<span class="muted-text">Humedad</span>' +
           boxChartSvg({ id: "gh" + s.id, pts: ser(s.id, "humidity"), cmp: null, from: gFrom, to: now, mn: s.humMin, mx: s.humMax, unit: "%", dec: 0, gapMs: gGap, minSpan: 10, h: 150, label: "Humedad de " + s.name }) +
           "</div>";
+      }).join("") + "</div></div>";
+
+    // Comportamiento por HORA DEL DÍA (promedio de los últimos 7 días, solo lecturas reales): sirve para
+    // ver a qué horas sube o baja cada valor y decidir horarios de lámparas o ventilación.
+    const wk = (await App.store.readingsRange(now - 7 * DAY, now)).filter((r) => r.source !== "simulation");
+    const prof = (sid) => {
+      const acc = Array.from({ length: 24 }, () => ({ tempIn: [0, 0], tempOut: [0, 0], humidity: [0, 0], n: 0 }));
+      wk.forEach((r) => { if (r.sensorId !== sid) return; const a = acc[new Date(r.ts).getHours()]; let any = false; ["tempIn", "tempOut", "humidity"].forEach((k) => { if (r[k] != null && isFinite(r[k])) { a[k][0] += r[k]; a[k][1]++; any = true; } }); if (any) a.n++; });
+      return acc.map((a, h) => ({ h, n: a.n, tempIn: a.tempIn[1] ? a.tempIn[0] / a.tempIn[1] : null, tempOut: a.tempOut[1] ? a.tempOut[0] / a.tempOut[1] : null, humidity: a.humidity[1] ? a.humidity[0] / a.humidity[1] : null }));
+    };
+    let oldest = now;
+    wk.forEach((r) => { if (r.ts < oldest) oldest = r.ts; });
+    const days = wk.length ? Math.max(1, Math.round((now - oldest) / DAY)) : 0;
+    const profHtml = '<div class="panel home-charts"><header><h2>Cómo se comporta en el día · promedio por hora</h2><div class="spacer"></div><span class="muted-text">' + (days ? "últimos " + Math.min(7, days) + " día" + (days > 1 ? "s" : "") + " · solo lecturas reales" : "") + '</span></header><div class="panel-body home-charts-grid">' +
+      App.sensors.filter((s) => s.enabled).map((s) => {
+        const p = prof(s.id);
+        if (!p.some((x) => x.n)) return '<div class="col"><h3 class="hc-title">' + esc(s.name) + '</h3><p class="muted-text">Aún no hay lecturas reales para calcular el promedio por hora.</p></div>';
+        const pts = (k) => p.filter((x) => x[k] != null).map((x) => ({ t: dayStart + x.h * HOUR + HOUR / 2, v: x[k] }));
+        const c = (v, d) => (v == null ? "–" : esc(fmt(v, d)));
+        const pick = (k, gt) => { const ok = p.filter((x) => x[k] != null); return ok.length ? ok.reduce((m, x) => ((gt ? x[k] > m[k] : x[k] < m[k]) ? x : m)) : null; };
+        const hiO = pick("tempOut", true), loO = pick("tempOut", false);
+        return '<div class="col"><h3 class="hc-title">' + esc(s.name) + "</h3>" +
+          '<div class="legend"><span><i class="lg-line"></i>OUT · sonda (caja)</span><span><i class="lg-dash"></i>IN · aparato (cuarto)</span>' + (s.tempMin != null && s.tempMax != null ? '<span><i class="lg-zone"></i>Tus límites</span>' : "") + "</div>" +
+          boxChartSvg({ id: "p" + s.id, pts: pts("tempOut"), cmp: pts("tempIn"), from: dayStart, to: dayStart + DAY - 1, mn: s.tempMin, mx: s.tempMax, unit: "°C", dec: 1, gapMs: 2.5 * HOUR, minSpan: 2, h: 220, noNow: true, label: "Promedio por hora del día de IN y OUT en " + s.name }) +
+          '<span class="muted-text">Humedad promedio por hora</span>' +
+          boxChartSvg({ id: "ph" + s.id, pts: pts("humidity"), cmp: null, from: dayStart, to: dayStart + DAY - 1, mn: s.humMin, mx: s.humMax, unit: "%", dec: 0, gapMs: 2.5 * HOUR, minSpan: 10, h: 140, noNow: true, label: "Humedad promedio por hora en " + s.name }) +
+          (hiO && loO ? '<p class="hint">OUT más alta en promedio hacia las <b>' + pad2(hiO.h) + ":00</b> (" + c(hiO.tempOut, 1) + " °C) y más baja hacia las <b>" + pad2(loO.h) + ":00</b> (" + c(loO.tempOut, 1) + " °C). Es un promedio: sirve para ajustar horarios, no indica la causa.</p>" : "") +
+          '<details class="hour-table"><summary>Ver tabla por hora</summary><div class="table-scroll"><table><thead><tr><th>Hora</th><th>IN · aparato</th><th>OUT · sonda</th><th>OUT − IN</th><th>Humedad</th><th>Lecturas</th></tr></thead><tbody>' +
+            p.map((x) => "<tr><td>" + pad2(x.h) + ":00–" + pad2(x.h) + ":59</td><td>" + c(x.tempIn, 1) + " °C</td><td>" + c(x.tempOut, 1) + " °C</td><td>" + (x.tempIn != null && x.tempOut != null ? esc((x.tempOut - x.tempIn >= 0 ? "+" : "−") + fmt(Math.abs(x.tempOut - x.tempIn), 1)) + " °C" : "–") + "</td><td>" + c(x.humidity, 0) + " %</td><td>" + x.n + "</td></tr>").join("") +
+          "</tbody></table></div></details></div>";
       }).join("") + "</div></div>";
 
     const boxes = thermal && thermal.boxes ? thermal.boxes.filter((b) => b.enabled) : [];
@@ -878,7 +969,7 @@
     if (keepH) host.style.minHeight = keepH + "px";
     host.innerHTML =
       '<div class="home"><div class="boxes">' + cards.join("") + "</div>" + todoHtml + "</div>" +
-      chartsHtml +
+      chartsHtml + profHtml +
       '<div class="trio">' +
         '<div class="panel"><header><h2>Hoy en resumen</h2></header><div class="panel-body col">' + (resumen.join("") || '<p class="muted-text">No hay sensores activos.</p>') +
           '<button class="btn small" id="askToday" type="button">¿Hubo cambios importantes hoy?</button><div id="todayAnswer" class="answer" hidden></div></div></div>' +
@@ -1986,7 +2077,7 @@
     if (pMax.v !== pMin.v) s += mark(pMax, "máx", true) + mark(pMin, "mín", false);
     // ahora
     const now = Date.now();
-    if (now >= o.from && now <= o.to + 1000) {
+    if (!o.noNow && now >= o.from && now <= o.to + 1000) {
       const x = X(Math.min(now, o.to));
       s += '<line x1="' + f1(x) + '" x2="' + f1(x) + '" y1="' + (pt - 6) + '" y2="' + (H - pb) + '" style="stroke:var(--brand);stroke-width:2;stroke-dasharray:3 4"/>' +
         '<text x="' + f1(x - 4) + '" y="' + (pt - 8) + '" text-anchor="end" style="fill:var(--brand);font-size:13px;font-weight:700">ahora</text>';
@@ -2083,8 +2174,18 @@
     const [nRead, nSnap] = await Promise.all([App.store.countReadings(), App.store.countSnapshots()]);
     const th = window.MonThermalUI;
     const thOn = !!thermalStatus();
+    const lastPc = await App.store.getKV("lastPcBackup");
+    const vh = ((await App.store.getKV("versionHistory")) || []).slice(-5).reverse();
     host.innerHTML =
       '<div class="page-head"><h1>Datos y conexiones</h1></div>' +
+      '<div class="panel"><header><h2>Tus lecturas están protegidas</h2><div class="spacer"></div><span class="chip ok">Versión ' + APP_VERSION + '</span></header><div class="panel-body">' +
+        '<p class="hint">Actualizar la app <b>no borra</b> lecturas ni muestras: viven en este computador (navegador) y además se copian solas, una vez al día y en cada actualización, a la carpeta <b>Documentos › BioTeva-Monitor-Respaldos</b> (copia completa .json para restaurar + Excel de 30 días para revisar). Se guardan las últimas 30 copias.</p>' +
+        '<div class="conn-row"><div><b>Copia en el computador</b><span class="muted-text">' +
+          (lastPc ? "Última: " + esc(fmtWhen(lastPc.ts)) + " · " + esc(String(lastPc.readings)) + " lecturas" + (lastPc.dir ? " · " + esc(lastPc.dir) : "") : "Aún no hay copias en el computador.") +
+          (App.backupError ? ' · <span class="crit-text">Último intento falló: ' + esc(App.backupError) + ".</span>" : "") + "</span></div>" +
+          '<button class="btn primary" type="button" id="dPcBk">Guardar copia ahora</button></div>' +
+        (vh.length ? '<div class="conn-row"><div><b>Historial de versiones</b><span class="muted-text">' + vh.map((x) => esc(x.v) + " el " + esc(fmtWhen(x.ts)) + " (" + esc(String(x.readings)) + " lecturas guardadas)").join(" · ") + "</span></div></div>" : "") +
+      "</div></div>" +
       '<div class="panel"><header><h2>Llevar tus datos a otros sistemas</h2></header><div class="panel-body">' +
         '<div class="conn-row"><div><b>Excel</b><span class="muted-text">Lecturas, alertas y resumen por día, listo para abrir en Excel.</span></div>' +
           '<select id="dXlsxDays" aria-label="Periodo del Excel"><option value="1">Hoy</option><option value="7">7 días</option><option value="30" selected>30 días</option></select>' +
@@ -2114,6 +2215,12 @@
     $("#dSumCopy").addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(JSON.stringify(await summary())); toast("Resumen copiado. Pégalo en el panel → Monitoreo."); }
       catch (e) { toast("No se pudo copiar; usa «Descargar».", "warn"); }
+    });
+    $("#dPcBk").addEventListener("click", async (ev) => {
+      ev.target.disabled = true;
+      try { const i = await saveBackupToPc("manual"); toast("Copia guardada en " + (i.dir || "el computador") + " (" + i.files.length + " archivos)."); }
+      catch (e) { App.backupError = e.message; toast("No se pudo guardar en el computador: " + e.message + ". Usa «Crear copia» para descargarla.", "warn"); }
+      renderDatos();
     });
     $("#dBkExport").addEventListener("click", async () => {
       const data = await App.store.exportBackup();
@@ -2434,6 +2541,10 @@
     }
     await loadConfig();
     try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { /* opcional */ }
+    $$(".app-ver").forEach((el) => { el.textContent = APP_VERSION; el.title = "Versión " + APP_VERSION + " · " + APP_DATE; });
+    await checkVersion();
+    setTimeout(() => autoBackupCheck(), 60000);
+    setInterval(() => autoBackupCheck(), 30 * 60000);
 
     $$("#tabs .tab, #bottomNav button, #sideNav button").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
     $$("[data-nav]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); showView(a.dataset.nav); }));

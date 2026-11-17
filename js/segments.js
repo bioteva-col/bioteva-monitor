@@ -2078,6 +2078,79 @@
     return q.map(function (p) { return { x: c.x + (p.x - c.x) * k, y: c.y + (p.y - c.y) * k }; });
   }
 
+  /** Gira un cuadrilátero alrededor de su centro (grados, sentido horario en la imagen). */
+  function rotateQuad(q, deg) {
+    var c = quadCenter(q), a = (deg * Math.PI) / 180, co = Math.cos(a), si = Math.sin(a);
+    return q.map(function (p) { var dx = p.x - c.x, dy = p.y - c.y; return { x: c.x + dx * co - dy * si, y: c.y + dx * si + dy * co }; });
+  }
+  // Lectura con forma posible en el HTC-2: hora válida, decimales exactos, sin ceros a la izquierda («07.1» no
+  // existe) y humedad de 2 cifras sin signo.
+  var fieldOk = function (r, k, f) {
+    if (!r || r.blank || !r.text) return false;
+    if (k === "time") return /^([01]?\d|2[0-3]):[0-5]\d$/.test(r.text);
+    if (k === "humidity") return /^[1-9]\d$/.test(r.text);
+    var d = (f && f.decimals) || 0;
+    return new RegExp("^-?(0|[1-9]\\d*)" + (d ? "\\.\\d{" + d + "}" : "") + "$").test(r.text);
+  };
+
+  /**
+   * Lee todos los campos de una pantalla tolerando una PEQUEÑA INCLINACIÓN del sensor
+   * (o de la cámara) respecto a la calibración. Primero lee en la posición calibrada; solo
+   * los campos que salen dudosos (formato inválido o confianza < minConf) se vuelven a leer
+   * girando el cuadro ±2…±8° y variando la cursiva ±4°, y se queda con la lectura de mayor
+   * confianza (exige +5 puntos para cambiar). Un campo en blanco (pantalla apagada) no se fuerza.
+   * @returns { lcd, results: {key: decodeField}, angle: {key: grados usados}, tried }
+   */
+  function readLcd(frame, quad, fields, opts) {
+    opts = opts || {};
+    var keys = Object.keys(fields).filter(function (k) { return fields[k] && fields[k].enabled !== false; });
+    var fmtOf = function (k) { return k === "time" ? "time" : "number"; };
+    var readAt = function (q, slant, only) {
+      var lcd = prepareLcd(frame, q, opts.width || 480), W = lcd.size.w, H = lcd.size.h, res = {};
+      (only || keys).forEach(function (k) {
+        var f = fields[k];
+        res[k] = decodeField(lcd.img, { x: f.x * W, y: f.y * H, w: f.w * W, h: f.h * H }, { digits: f.digits, decimals: f.decimals, slantDeg: slant, lightSegments: opts.lightSegments, format: fmtOf(k) });
+      });
+      return { lcd: lcd, res: res };
+    };
+    var slant0 = opts.slantDeg || 0, minConf = opts.minConf == null ? 60 : opts.minConf;
+    var base = readAt(quad, slant0);
+    var out = { lcd: base.lcd, results: Object.assign({}, base.res), angle: {}, tried: 1 };
+    var weak = function () {
+      return keys.filter(function (k) { var r = out.results[k]; return !base.res[k].blank && (!fieldOk(r, k, fields[k]) || r.confidence < minConf); });
+    };
+    var score = function (res) { var t = 0, n = 0; keys.forEach(function (k) { if (base.res[k].blank) return; n++; t += fieldOk(res[k], k, fields[k]) ? res[k].confidence : 0; }); return n ? t / n : 0; };
+    var minOk = function (res) { var m = 100; keys.forEach(function (k) { if (!base.res[k].blank) m = Math.min(m, fieldOk(res[k], k, fields[k]) ? res[k].confidence : 0); }); return m; };
+    // Pantalla nítida y todo con forma válida: no hace falta girar.
+    if (opts.tilt === false || minOk(base.res) >= (opts.perfect || 98)) return out;
+    // 1) Ángulo global de la pantalla: grueso (0, ±4, ±8) y fino (±2 alrededor del mejor). Se elige el
+    //    que da MÁS confianza en TODOS los campos a la vez (un giro afecta a toda la pantalla), así un
+    //    valor leído «seguro pero mal» por quedar un dígito fuera del cuadro pierde frente al ángulo correcto.
+    var best = { a: 0, sc: score(base.res), v: base }, seen = { 0: true };
+    var tryAngle = function (ang) {
+      if (seen[ang]) return; seen[ang] = true;
+      var v = readAt(rotateQuad(quad, ang), slant0); out.tried++;
+      var sc = score(v.res);
+      if (sc > best.sc + 1) best = { a: ang, sc: sc, v: v };
+    };
+    (opts.angles || [-4, 4, -8, 8]).forEach(tryAngle);
+    var c0 = best.a;
+    [c0 - 2, c0 + 2].forEach(function (ang) { if (Math.abs(ang) <= 10) tryAngle(ang); });
+    if (best.a) keys.forEach(function (k) { out.results[k] = best.v.res[k]; out.angle[k] = best.a; });
+    // 2) Campos que siguen dudosos: cursiva ±4° en ese ángulo.
+    var q1 = best.a ? rotateQuad(quad, best.a) : quad;
+    [slant0 - 4, slant0 + 4].forEach(function (sl) {
+      var w = weak();
+      if (!w.length || sl < -2 || sl > 16) return;
+      var v = readAt(q1, sl, w); out.tried++;
+      w.forEach(function (k) {
+        var r = v.res[k], cur = out.results[k];
+        if (fieldOk(r, k, fields[k]) && (!fieldOk(cur, k, fields[k]) || r.confidence > cur.confidence + 5)) { out.results[k] = r; out.angle[k] = best.a; }
+      });
+    });
+    return out;
+  }
+
   var APP_W = 64, APP_H = 48;
   /** Apariencia enderezada del equipo (LCD + bisel + algo de carcasa): no depende de rotación ni perspectiva. */
   function appearance(frame, q) { return warpQuad(frame, expandQuad(q, 1.35), APP_W, APP_H).d; }
@@ -2348,6 +2421,8 @@
     thumbToB64: thumbToB64,
     b64ToThumb: b64ToThumb,
     decodeField: decodeField,
+    readLcd: readLcd,
+    rotateQuad: rotateQuad,
     renderField: renderField,
     renderDisplay: renderDisplay,
     makeSimFrame: makeSimFrame,
