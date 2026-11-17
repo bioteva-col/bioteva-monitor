@@ -747,10 +747,13 @@
     const noData = st.code === "SIN_DATOS";
     const t = shownValue(last, ck), h = shownValue(last, "humidity"), o = shownValue(last, other);
     const tOut = outOf(t.v, s.tempMin, s.tempMax);
-    let hero;
-    if (noData || (t.v == null && t.doubt == null)) hero = '<span class="hero-num off" aria-label="sin dato">– –</span>';
-    else if (t.v == null) hero = '<span class="hero-num struck" title="Lectura dudosa: no se usa">' + fmt(t.doubt) + "<small>°C</small></span>";
-    else hero = '<span class="hero-num' + (tOut ? " crit" : "") + '">' + fmt(t.v) + "<small>°C</small></span>";
+    const bigNum = (x, crit) => noData || (x.v == null && x.doubt == null) ? '<span class="hero-num off" aria-label="sin dato">– –</span>'
+      : x.v == null ? '<span class="hero-num struck" title="Lectura dudosa: no se usa">' + fmt(x.doubt) + "<small>°C</small></span>"
+      : '<span class="hero-num' + (crit ? " crit" : "") + '">' + fmt(x.v) + "<small>°C</small></span>";
+    const vIn = ck === "tempIn" ? t : o, vOut = ck === "tempOut" ? t : o;
+    const cell = (key, x, label) => '<div class="hero-cell' + (key === ck ? " ctl" : "") + '"><span class="box-label">' + label + (key === ck ? ' <em class="ctl-tag">controla</em>' : "") + "</span>" + bigNum(x, key === ck && tOut) + "</div>";
+    const hero = '<div class="hero-pair">' + cell("tempIn", vIn, "Temp. del cuarto (IN)") + cell("tempOut", vOut, "Temp. de la caja (OUT)") + "</div>";
+    const diff = !noData && vIn.v != null && vOut.v != null ? vOut.v - vIn.v : null;
     let note = "";
     if (noData) note = '<p class="range-note off">' + esc(st.note || "Sin lecturas") + "</p>";
     else if (t.v == null && t.doubt != null) note = '<p class="range-note warn">La app no está segura de este número y no lo usa. Si pasa seguido, calibra de nuevo.</p>';
@@ -768,11 +771,11 @@
     return '<article class="box ' + ui.box + '">' +
       '<div class="box-head"><h2>' + esc(s.name) + (s.enabled ? "" : " (apagado)") + "</h2>" + statusChip(st.code) + "</div>" +
       '<div class="box-body">' +
-        '<span class="box-label">' + (ck === "tempOut" ? "Temperatura de la caja (OUT)" : "Temperatura (IN)") + "</span>" +
-        '<div class="hero">' + hero + '<div class="trend">' + (noData ? "" : trendHtml(hourRows, ck, "°C")) + "<span>" + (last ? '<span data-ago="' + last.ts + '">' + esc(fmtAgo(last.ts)) + "</span>" : "aún sin lecturas") + (last && last.source === "simulation" ? ' · <span class="tag">simulación</span>' : "") + "</span></div></div>" +
+        hero +
+        '<div class="trend row">' + (noData ? "" : trendHtml(hourRows, ck, "°C")) + "<span>" + (last ? '<span data-ago="' + last.ts + '">' + esc(fmtAgo(last.ts)) + "</span>" : "aún sin lecturas") + (last && last.source === "simulation" ? ' · <span class="tag">simulación</span>' : "") + "</span></div>" +
         (noData ? "" : rangeHtml(t.v, s.tempMin, s.tempMax, "°C", 1)) + note +
         '<div class="duo"><div class="kv"><span>Humedad</span>' + kvv(noData ? {} : h, "%", 0, outOf(h.v, s.humMin, s.humMax)) + '<span class="s">' + esc(humLim) + "</span></div>" +
-        '<div class="kv"><span>' + (other === "tempIn" ? "Temp. del cuarto (IN)" : "Temp. de la caja (OUT)") + "</span>" + kvv(noData ? {} : o, "°C", 1, false) + "</div></div>" +
+        '<div class="kv"><span>Diferencia OUT − IN</span>' + (diff == null ? '<span class="v md">– –</span>' : '<span class="v md">' + (diff > 0 ? "+" : diff < 0 ? "−" : "") + fmt(Math.abs(diff)) + " °C</span>") + '<span class="s">' + (diff == null ? "falta una lectura" : diff > 0.05 ? "la caja está más caliente que el cuarto" : diff < -0.05 ? "la caja está más fría que el cuarto" : "caja y cuarto iguales") + "</span></div></div>" +
         lampLine(thermalBoxFor(s.id)) +
       "</div>" +
       '<button class="box-foot" type="button" data-caja="' + esc(s.id) + '">Ver gráfica de hoy <span aria-hidden="true">→</span></button>' +
@@ -843,6 +846,22 @@
           (b ? '<div><button class="btn on-act" type="button" data-act="' + i + '">' + esc(b[0]) + "</button></div>" : "") + "</div>";
       }).join("") + "</aside>";
 
+    // Gráficas de hoy: OUT (línea) e IN (punteada) en la misma gráfica para comparar, y la humedad
+    const gFrom = Math.min(dayStart, now - 6 * HOUR);
+    const gRows = gFrom < dayStart ? (await App.store.readingsRange(gFrom, now)).sort((a, b) => a.ts - b.ts) : today;
+    const gGap = Math.max(3 * S.intervalSec * 1000, 5 * 60000);
+    const ser = (sid, k) => L.series(gRows, sid, k, gFrom, now, 400).map((p) => ({ t: p.t, v: p.v }));
+    const chartsHtml = '<div class="panel home-charts"><header><h2>Gráficas · ' + (gFrom < dayStart ? "últimas 6 horas" : "hoy") + '</h2><div class="spacer"></div><a class="btn ghost small" href="#graficas" data-go="graficas">Más periodos →</a></header><div class="panel-body home-charts-grid">' +
+      App.sensors.filter((s) => s.enabled).map((s) => {
+        const ck = L.controlKey(s), oth = ck === "tempOut" ? "tempIn" : "tempOut", lab = (k) => (k === "tempOut" ? "OUT · caja" : "IN · cuarto");
+        return '<div class="col"><h3 class="hc-title">' + esc(s.name) + "</h3>" +
+          '<div class="legend"><span><i class="lg-line"></i>' + lab(ck) + '</span><span><i class="lg-dash"></i>' + lab(oth) + "</span>" + (s.tempMin != null && s.tempMax != null ? '<span><i class="lg-zone"></i>Tus límites</span>' : "") + "</div>" +
+          boxChartSvg({ id: "g" + s.id, pts: ser(s.id, ck), cmp: ser(s.id, oth), from: gFrom, to: now, mn: s.tempMin, mx: s.tempMax, unit: "°C", dec: 1, gapMs: gGap, minSpan: 2, h: 240, label: "Temperatura IN y OUT de " + s.name }) +
+          '<span class="muted-text">Humedad</span>' +
+          boxChartSvg({ id: "gh" + s.id, pts: ser(s.id, "humidity"), cmp: null, from: gFrom, to: now, mn: s.humMin, mx: s.humMax, unit: "%", dec: 0, gapMs: gGap, minSpan: 10, h: 150, label: "Humedad de " + s.name }) +
+          "</div>";
+      }).join("") + "</div></div>";
+
     const boxes = thermal && thermal.boxes ? thermal.boxes.filter((b) => b.enabled) : [];
     const lampsHtml = '<div class="panel"><header><h2>Lámparas</h2><div class="spacer"></div><a class="btn ghost small" href="#termico" data-go="termico">Abrir →</a></header><div class="panel-body">' +
       (boxes.length
@@ -859,6 +878,7 @@
     if (keepH) host.style.minHeight = keepH + "px";
     host.innerHTML =
       '<div class="home"><div class="boxes">' + cards.join("") + "</div>" + todoHtml + "</div>" +
+      chartsHtml +
       '<div class="trio">' +
         '<div class="panel"><header><h2>Hoy en resumen</h2></header><div class="panel-body col">' + (resumen.join("") || '<p class="muted-text">No hay sensores activos.</p>') +
           '<button class="btn small" id="askToday" type="button">¿Hubo cambios importantes hoy?</button><div id="todayAnswer" class="answer" hidden></div></div></div>' +

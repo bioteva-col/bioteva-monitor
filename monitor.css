@@ -516,3 +516,15 @@ ol.cal-progress li[data-calstep], ol.cal-progress li[data-calsensor] { cursor: p
 .kv .v, .kpi .v, .cmp .app { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .kv .v.md { min-width: 4.5ch; }
 .box-body, .act, .kpi { contain: layout; }
+
+/* ── Inicio: IN y OUT grandes lado a lado + gráficas ── */
+.hero-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.hero-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.hero-pair .hero-num { font-size: clamp(44px, 5vw, 76px); min-width: 0; }
+.hero-pair .hero-num small { font-size: .4em; }
+.ctl-tag { font-style: normal; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; margin-left: 4px; }
+.trend.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.home-charts { margin-top: 20px; }
+.home-charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 22px; }
+.hc-title { margin: 0; font-size: 16px; }
+@media (max-width: 760px) { .hero-pair .hero-num { font-size: 46px; } .home-charts-grid { grid-template-columns: 1fr; } }
