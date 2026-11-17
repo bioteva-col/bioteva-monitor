@@ -147,10 +147,15 @@
     return "No se pudo abrir la cámara: " + (e && e.message ? e.message : String(e));
   }
 
-  async function refreshDevices() {
+  async function refreshDevices(ask) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
     try {
-      const all = await navigator.mediaDevices.enumerateDevices();
+      let all = await navigator.mediaDevices.enumerateDevices();
+      // Sin permiso, Chrome devuelve las cámaras sin nombre ni id: no se pueden elegir. Se pide permiso un instante.
+      if (ask && all.some((d) => d.kind === "videoinput" && !d.deviceId) && navigator.mediaDevices.getUserMedia) {
+        try { const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); tmp.getTracks().forEach((t) => t.stop()); all = await navigator.mediaDevices.enumerateDevices(); }
+        catch (e) { toast(cameraErrorMessage(e), "warn"); }
+      }
       App.cam.devices = all.filter((d) => d.kind === "videoinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || "Camera " + (i + 1) }));
     } catch (e) { App.cam.devices = []; }
     renderCameraForm();
@@ -201,7 +206,8 @@
         const track = stream.getVideoTracks()[0];
         const real = (track.getSettings && track.getSettings().deviceId) || id;
         track.addEventListener("ended", () => setCamStatus("error", "La cámara se desconectó o dejó de enviar imagen (" + track.label + ")."));
-        App.cam.streams.push({ requested: id, deviceId: real, label: track.label || "Cámara", stream, video, canvas: document.createElement("canvas") });
+        const st = (track.getSettings && track.getSettings()) || {};
+        App.cam.streams.push({ requested: id, deviceId: real, label: (track.label || "Cámara") + (st.width ? " · " + st.width + "×" + st.height : ""), stream, video, canvas: document.createElement("canvas") });
         if (!id && App.settings.cameraMode === "single") await saveSettings({ cameraDeviceId: real || null });
       }
       setCamStatus("active");
@@ -319,7 +325,7 @@
       if (!f || !f.enabled) return;
       const roi = { x: f.x * size.w, y: f.y * size.h, w: f.w * size.w, h: f.h * size.h };
       const r = Seg.decodeField(clean, roi, { digits: f.digits, decimals: f.decimals, slantDeg: cal.slantDeg, lightSegments: cal.lightSegments, format: key === "time" ? "time" : "number" });
-      fields[key] = { text: r.text, confidence: r.confidence };
+      fields[key] = { text: r.text, confidence: r.confidence, alts: r.alts || [] };
       details[key] = r;
     });
     const thumb = Seg.thumbnail(raw);
@@ -466,6 +472,11 @@
     const now = Date.now(), S = App.settings, cache = {}, results = [];
     try {
       const active = App.sensors.filter((s) => s.enabled);
+      // luz de lectura (enchufe TP-Link): se enciende, se espera a que la cámara ajuste la exposición, y se apaga al final
+      if (S.frameSource === "camera" && window.MonThermalUI && window.MonThermalUI.readingLight) {
+        const lead = await window.MonThermalUI.readingLight(true);
+        if (lead) { App.lightOn = true; await new Promise((r) => setTimeout(r, Math.min(lead, 60000))); }
+      }
       const frames = new Map(active.map((s) => [s.id, grabFrame(s, cache, now, true)]));
       trackFrames((s) => frames.get(s.id));
       // fotogramas extra para votar (solo cámara: una imagen fija o la simulación no cambian)
@@ -477,6 +488,7 @@
           active.forEach((s) => { const f = grabFrame(s, c2, now, true); if (f && !f.error) extra.get(s.id).push(f); });
         }
       }
+      if (App.lightOn) { App.lightOn = false; window.MonThermalUI.readingLight(false); } // ya están las fotos
       for (const sensor of active) {
         const fr = frames.get(sensor.id);
         let capture;
@@ -526,6 +538,7 @@
     } catch (e) {
       toast("Error en el ciclo de lectura: " + (e && e.message ? e.message : e), "crit");
     } finally {
+      if (App.lightOn) { App.lightOn = false; window.MonThermalUI.readingLight(false); }
       App.busy = false;
       if (App.running) App.nextAt = now + S.intervalSec * 1000;
       renderHeader();
@@ -1015,7 +1028,7 @@
     });
     $("#camStart").addEventListener("click", startCameras);
     $("#camStop").addEventListener("click", async () => { if (App.running) await setRunning(false); stopCameras(); });
-    $("#camRefresh").addEventListener("click", refreshDevices);
+    $("#camRefresh").addEventListener("click", async () => { await refreshDevices(true); toast(App.cam.devices.length + (App.cam.devices.length === 1 ? " cámara encontrada" : " cámaras encontradas") + ". Elige en «Cámara» la que leerá los sensores.", "info"); });
     $("#imgFile").addEventListener("change", (e) => {
       const f = e.target.files && e.target.files[0];
       if (!f) return;

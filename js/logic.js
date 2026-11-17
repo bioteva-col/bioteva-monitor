@@ -115,7 +115,7 @@
     if (INTERVAL_OPTIONS.indexOf(s.intervalSec) < 0) errors.push("intervalSec: valor no permitido");
     if (["single", "dual"].indexOf(s.cameraMode) < 0) errors.push("cameraMode inválido");
     if (["camera", "image", "simulation"].indexOf(s.frameSource) < 0) errors.push("frameSource inválido");
-    if (["640x480", "1280x720", "1920x1080"].indexOf(s.resolution) < 0) errors.push("resolution inválida");
+    if (["640x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"].indexOf(s.resolution) < 0) errors.push("resolution inválida");
     if (["off", "events", "all"].indexOf(s.saveSnapshots) < 0) errors.push("saveSnapshots inválido");
     if (s.minConfidence >= s.highConfidence) errors.push("La confianza mínima debe ser menor que la confianza alta");
     if (s.plausibleTempMin >= s.plausibleTempMax) errors.push("Rango de plausibilidad inválido");
@@ -234,6 +234,10 @@
     if (key === "humidity") return v >= 0 && v <= 100;
     return v >= s.plausibleTempMin && v <= s.plausibleTempMax;
   }
+  // Escala de medición del termohigrómetro HTC-2 (especificación del fabricante): interior
+  // −10…50 °C, sonda exterior −50…70 °C, humedad 10…99 %. Fuera de ella la lectura es imposible.
+  var DEVICE_RANGE = { tempIn: [-10, 50], tempOut: [-50, 70], humidity: [10, 99] };
+  function inDeviceRange(key, v) { var r = DEVICE_RANGE[key]; return !r || (v >= r[0] && v <= r[1]); }
   function maxJump(key, s) { return key === "humidity" ? s.maxHumidityJump : s.maxTempJump; }
 
   /**
@@ -280,11 +284,36 @@
       }
     }
 
-    if (!plausible(key, value, s)) return invalid(["OUT_OF_PLAUSIBLE_RANGE"], value + " está fuera del rango físico plausible configurado.");
+    // Corrección por contexto: si la lectura es imposible o salta demasiado, se prueba la 2.ª opción
+    // de los dígitos dudosos (1↔7, 2↔7…) y se queda la que concuerda con la lectura anterior.
+    var inRange = function (v) { return plausible(key, v, s) && inDeviceRange(key, v); };
+    var altFix = function () {
+      var c = ((ocr && ocr.alts) || []).map(function (t) { return String(t).trim().replace(",", "."); })
+        .filter(function (t) { return /^-?\d+(\.\d+)?$/.test(t) && (decimals === 0 || t.indexOf(".") >= 0); })
+        .map(function (t) { return { t: t, v: Number(t) }; })
+        .filter(function (x) { return inRange(x.v); });
+      if (prev != null) c = c.filter(function (x) { return Math.abs(x.v - prev) <= maxJump(key, s); }).sort(function (a, b) { return Math.abs(a.v - prev) - Math.abs(b.v - prev); });
+      else if (c.length !== 1) return null; // sin lectura anterior solo si hay UNA alternativa posible
+      return c[0] || null;
+    };
+    var applyFix = function (fx, why) {
+      flags.push("OCR_CORRECTION");
+      note = (note ? note + " " : "") + "Corrección OCR: se leyó \"" + text + "\" (" + why + "); un dígito era dudoso y \"" + fx.t + "\" " + (prev != null ? "concuerda con la lectura anterior " + prev : "es la única lectura posible") + ".";
+      value = fx.v; text = fx.t;
+      confidence = Math.min(confidence, (s.minConfidence + s.highConfidence) / 2);
+    };
+
+    if (!inRange(value)) {
+      var fx = altFix();
+      if (!fx) return invalid(["OUT_OF_PLAUSIBLE_RANGE"], value + (inDeviceRange(key, value) ? " está fuera del rango físico plausible configurado." : " está fuera de la escala de medición del termohigrómetro HTC-2 (lectura imposible)."));
+      applyFix(fx, "fuera de escala");
+    }
 
     if (prev != null && Math.abs(value - prev) > maxJump(key, s)) {
       var confirmedBy = ctx.previousRaw;
       var confirmed = confirmedBy != null && Math.abs(value - confirmedBy) <= maxJump(key, s) / 2;
+      var fx2 = confirmed ? null : altFix();
+      if (fx2) { applyFix(fx2, "salto de " + signed(value - prev) + " respecto a " + prev); confirmed = true; }
       if (!confirmed) {
         flags.push("IMPROBABLE_JUMP");
         note = (note ? note + " " : "") + "Salto de " + signed(value - prev) + " respecto a la lectura anterior (" + prev + "); se confirma con la siguiente lectura.";
@@ -1122,12 +1151,14 @@
       var tally = {};
       caps.forEach(function (c) {
         var f = c.fields && c.fields[k];
-        if (f && f.text) { var t = (tally[f.text] = tally[f.text] || { n: 0, conf: 0 }); t.n++; t.conf += f.confidence; }
+        if (f && f.text) { var t = (tally[f.text] = tally[f.text] || { n: 0, conf: 0, alts: [] }); t.n++; t.conf += f.confidence; (f.alts || []).forEach(function (a) { if (t.alts.indexOf(a) < 0) t.alts.push(a); }); }
       });
       var best = Object.keys(tally).sort(function (a, b) { return tally[b].n - tally[a].n || tally[b].conf - tally[a].conf; })[0];
       if (best == null) { out.fields[k] = last.fields ? last.fields[k] : undefined; return; }
       var t = tally[best], agree = t.n / caps.length, conf = t.conf / t.n;
-      out.fields[k] = { text: best, confidence: agree >= minAgree ? conf : Math.min(conf, 35), votes: t.n + "/" + caps.length };
+      // las otras lecturas de la votación también son alternativas para corregir por contexto
+      var alts = t.alts.concat(Object.keys(tally)).filter(function (x, i, arr) { return x !== best && arr.indexOf(x) === i; });
+      out.fields[k] = { text: best, confidence: agree >= minAgree ? conf : Math.min(conf, 35), votes: t.n + "/" + caps.length, alts: alts };
     });
     out.votes = caps.length;
     return out;
@@ -1150,7 +1181,7 @@
       var aOk = a && a.text && a.confidence >= sure, vOk = v && v.text && v.confidence >= sure;
       var r;
       if (a && v && a.text && a.text === v.text) r = Object.assign({}, v, { confidence: Math.max(a.confidence, v.confidence) });
-      else if (aOk && vOk) r = { text: a.text, confidence: Math.min(a.confidence, v.confidence, 35), votes: v.votes, disagree: v.text };
+      else if (aOk && vOk) r = { text: a.text, confidence: Math.min(a.confidence, v.confidence, 35), votes: v.votes, disagree: v.text, alts: [v.text].concat(a.alts || [], v.alts || []) };
       else if (aOk) r = Object.assign({}, a, { votes: v && v.votes });
       else r = v || a;
       if (r) r.averaged = true;

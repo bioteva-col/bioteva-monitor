@@ -541,23 +541,36 @@
       var ch = best.ch, conf = Math.max(0, Math.min(1, second.d - best.d));
       if (best.d > 2.2) { ch = "?"; conf = 0; } // no se parece a ningún dígito
       if (ch !== " ") seenVisible = true;
-      out.push({ ch: ch, conf: conf, bits: bits });
+      // 2.ª opción si está cerca (1↔7 difieren en un solo segmento): sirve para corregir por contexto
+      var alt = ranked.slice(1, 3).filter(function (r) { return r.d - best.d < 1.2 && /\d/.test(r.ch); }).map(function (r) { return r.ch; });
+      out.push({ ch: ch, conf: conf, bits: bits, alt: alt });
     }
 
     var chars = out.map(function (o) { return o.ch; });
     var first = chars.findIndex(function (c) { return c !== " "; });
     if (first < 0) return { text: "", confidence: 0, contrast: contrast100, blank: true, digits: out };
-    var body = chars.slice(first).join("");
-    var text;
-    if (opts.format === "time") {
-      text = body.length > 2 ? body.slice(0, -2) + ":" + body.slice(-2) : body;
-    } else if (decimals > 0) {
-      var sign = body[0] === "-" ? "-" : "", num = sign ? body.slice(1) : body;
-      while (num.length <= decimals) num = "0" + num;
-      text = sign + num.slice(0, num.length - decimals) + "." + num.slice(num.length - decimals);
-    } else {
-      text = body;
-    }
+    var fmt = function (cs) {
+      var f = cs.findIndex(function (c) { return c !== " "; });
+      if (f < 0) return "";
+      var body = cs.slice(f).join("");
+      if (opts.format === "time") return body.length > 2 ? body.slice(0, -2) + ":" + body.slice(-2) : body;
+      if (decimals > 0) {
+        var sign = body[0] === "-" ? "-" : "", num = sign ? body.slice(1) : body;
+        while (num.length <= decimals) num = "0" + num;
+        return sign + num.slice(0, num.length - decimals) + "." + num.slice(num.length - decimals);
+      }
+      return body;
+    };
+    var text = fmt(chars);
+    // lecturas alternativas: cambiando UN dígito dudoso por su 2.ª opción
+    var alts = [];
+    out.forEach(function (o, i) {
+      (o.alt || []).forEach(function (a) {
+        var cs = chars.slice(); cs[i] = a;
+        var t = fmt(cs);
+        if (t && t !== text && alts.indexOf(t) < 0) alts.push(t);
+      });
+    });
 
     // Letras mezcladas con cifras («L1.9», «7H») no existen en el HTC-2: se vuelve a leer solo con
     // cifras. Solo se aceptan letras cuando TODO el valor lo es (LL.L / HH.H = fuera de escala).
@@ -569,7 +582,7 @@
     var minConf = Math.min.apply(null, confVals), avgConf = meanOf(confVals);
     var contrastFactor = Math.min(1, contrast / 60);
     var confidence = Math.round((0.5 * minConf + 0.5 * avgConf) * contrastFactor * 1000) / 10;
-    return { text: text, confidence: confidence, contrast: contrast100, blank: false, digits: out };
+    return { text: text, confidence: confidence, contrast: contrast100, blank: false, digits: out, alts: alts };
   }
 
   // ─────────────────────── detección de pantallas ───────────────────────
@@ -2530,7 +2543,7 @@
     if (INTERVAL_OPTIONS.indexOf(s.intervalSec) < 0) errors.push("intervalSec: valor no permitido");
     if (["single", "dual"].indexOf(s.cameraMode) < 0) errors.push("cameraMode inválido");
     if (["camera", "image", "simulation"].indexOf(s.frameSource) < 0) errors.push("frameSource inválido");
-    if (["640x480", "1280x720", "1920x1080"].indexOf(s.resolution) < 0) errors.push("resolution inválida");
+    if (["640x480", "1280x720", "1920x1080", "2560x1440", "3840x2160"].indexOf(s.resolution) < 0) errors.push("resolution inválida");
     if (["off", "events", "all"].indexOf(s.saveSnapshots) < 0) errors.push("saveSnapshots inválido");
     if (s.minConfidence >= s.highConfidence) errors.push("La confianza mínima debe ser menor que la confianza alta");
     if (s.plausibleTempMin >= s.plausibleTempMax) errors.push("Rango de plausibilidad inválido");
@@ -2649,6 +2662,10 @@
     if (key === "humidity") return v >= 0 && v <= 100;
     return v >= s.plausibleTempMin && v <= s.plausibleTempMax;
   }
+  // Escala de medición del termohigrómetro HTC-2 (especificación del fabricante): interior
+  // −10…50 °C, sonda exterior −50…70 °C, humedad 10…99 %. Fuera de ella la lectura es imposible.
+  var DEVICE_RANGE = { tempIn: [-10, 50], tempOut: [-50, 70], humidity: [10, 99] };
+  function inDeviceRange(key, v) { var r = DEVICE_RANGE[key]; return !r || (v >= r[0] && v <= r[1]); }
   function maxJump(key, s) { return key === "humidity" ? s.maxHumidityJump : s.maxTempJump; }
 
   /**
@@ -2695,11 +2712,36 @@
       }
     }
 
-    if (!plausible(key, value, s)) return invalid(["OUT_OF_PLAUSIBLE_RANGE"], value + " está fuera del rango físico plausible configurado.");
+    // Corrección por contexto: si la lectura es imposible o salta demasiado, se prueba la 2.ª opción
+    // de los dígitos dudosos (1↔7, 2↔7…) y se queda la que concuerda con la lectura anterior.
+    var inRange = function (v) { return plausible(key, v, s) && inDeviceRange(key, v); };
+    var altFix = function () {
+      var c = ((ocr && ocr.alts) || []).map(function (t) { return String(t).trim().replace(",", "."); })
+        .filter(function (t) { return /^-?\d+(\.\d+)?$/.test(t) && (decimals === 0 || t.indexOf(".") >= 0); })
+        .map(function (t) { return { t: t, v: Number(t) }; })
+        .filter(function (x) { return inRange(x.v); });
+      if (prev != null) c = c.filter(function (x) { return Math.abs(x.v - prev) <= maxJump(key, s); }).sort(function (a, b) { return Math.abs(a.v - prev) - Math.abs(b.v - prev); });
+      else if (c.length !== 1) return null; // sin lectura anterior solo si hay UNA alternativa posible
+      return c[0] || null;
+    };
+    var applyFix = function (fx, why) {
+      flags.push("OCR_CORRECTION");
+      note = (note ? note + " " : "") + "Corrección OCR: se leyó \"" + text + "\" (" + why + "); un dígito era dudoso y \"" + fx.t + "\" " + (prev != null ? "concuerda con la lectura anterior " + prev : "es la única lectura posible") + ".";
+      value = fx.v; text = fx.t;
+      confidence = Math.min(confidence, (s.minConfidence + s.highConfidence) / 2);
+    };
+
+    if (!inRange(value)) {
+      var fx = altFix();
+      if (!fx) return invalid(["OUT_OF_PLAUSIBLE_RANGE"], value + (inDeviceRange(key, value) ? " está fuera del rango físico plausible configurado." : " está fuera de la escala de medición del termohigrómetro HTC-2 (lectura imposible)."));
+      applyFix(fx, "fuera de escala");
+    }
 
     if (prev != null && Math.abs(value - prev) > maxJump(key, s)) {
       var confirmedBy = ctx.previousRaw;
       var confirmed = confirmedBy != null && Math.abs(value - confirmedBy) <= maxJump(key, s) / 2;
+      var fx2 = confirmed ? null : altFix();
+      if (fx2) { applyFix(fx2, "salto de " + signed(value - prev) + " respecto a " + prev); confirmed = true; }
       if (!confirmed) {
         flags.push("IMPROBABLE_JUMP");
         note = (note ? note + " " : "") + "Salto de " + signed(value - prev) + " respecto a la lectura anterior (" + prev + "); se confirma con la siguiente lectura.";
@@ -3537,12 +3579,14 @@
       var tally = {};
       caps.forEach(function (c) {
         var f = c.fields && c.fields[k];
-        if (f && f.text) { var t = (tally[f.text] = tally[f.text] || { n: 0, conf: 0 }); t.n++; t.conf += f.confidence; }
+        if (f && f.text) { var t = (tally[f.text] = tally[f.text] || { n: 0, conf: 0, alts: [] }); t.n++; t.conf += f.confidence; (f.alts || []).forEach(function (a) { if (t.alts.indexOf(a) < 0) t.alts.push(a); }); }
       });
       var best = Object.keys(tally).sort(function (a, b) { return tally[b].n - tally[a].n || tally[b].conf - tally[a].conf; })[0];
       if (best == null) { out.fields[k] = last.fields ? last.fields[k] : undefined; return; }
       var t = tally[best], agree = t.n / caps.length, conf = t.conf / t.n;
-      out.fields[k] = { text: best, confidence: agree >= minAgree ? conf : Math.min(conf, 35), votes: t.n + "/" + caps.length };
+      // las otras lecturas de la votación también son alternativas para corregir por contexto
+      var alts = t.alts.concat(Object.keys(tally)).filter(function (x, i, arr) { return x !== best && arr.indexOf(x) === i; });
+      out.fields[k] = { text: best, confidence: agree >= minAgree ? conf : Math.min(conf, 35), votes: t.n + "/" + caps.length, alts: alts };
     });
     out.votes = caps.length;
     return out;
@@ -3565,7 +3609,7 @@
       var aOk = a && a.text && a.confidence >= sure, vOk = v && v.text && v.confidence >= sure;
       var r;
       if (a && v && a.text && a.text === v.text) r = Object.assign({}, v, { confidence: Math.max(a.confidence, v.confidence) });
-      else if (aOk && vOk) r = { text: a.text, confidence: Math.min(a.confidence, v.confidence, 35), votes: v.votes, disagree: v.text };
+      else if (aOk && vOk) r = { text: a.text, confidence: Math.min(a.confidence, v.confidence, 35), votes: v.votes, disagree: v.text, alts: [v.text].concat(a.alts || [], v.alts || []) };
       else if (aOk) r = Object.assign({}, a, { votes: v && v.votes });
       else r = v || a;
       if (r) r.averaged = true;
@@ -4928,10 +4972,15 @@
     return "No se pudo abrir la cámara: " + (e && e.message ? e.message : String(e));
   }
 
-  async function refreshDevices() {
+  async function refreshDevices(ask) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
     try {
-      const all = await navigator.mediaDevices.enumerateDevices();
+      let all = await navigator.mediaDevices.enumerateDevices();
+      // Sin permiso, Chrome devuelve las cámaras sin nombre ni id: no se pueden elegir. Se pide permiso un instante.
+      if (ask && all.some((d) => d.kind === "videoinput" && !d.deviceId) && navigator.mediaDevices.getUserMedia) {
+        try { const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); tmp.getTracks().forEach((t) => t.stop()); all = await navigator.mediaDevices.enumerateDevices(); }
+        catch (e) { toast(cameraErrorMessage(e), "warn"); }
+      }
       App.cam.devices = all.filter((d) => d.kind === "videoinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || "Camera " + (i + 1) }));
     } catch (e) { App.cam.devices = []; }
     renderCameraForm();
@@ -4982,7 +5031,8 @@
         const track = stream.getVideoTracks()[0];
         const real = (track.getSettings && track.getSettings().deviceId) || id;
         track.addEventListener("ended", () => setCamStatus("error", "La cámara se desconectó o dejó de enviar imagen (" + track.label + ")."));
-        App.cam.streams.push({ requested: id, deviceId: real, label: track.label || "Cámara", stream, video, canvas: document.createElement("canvas") });
+        const st = (track.getSettings && track.getSettings()) || {};
+        App.cam.streams.push({ requested: id, deviceId: real, label: (track.label || "Cámara") + (st.width ? " · " + st.width + "×" + st.height : ""), stream, video, canvas: document.createElement("canvas") });
         if (!id && App.settings.cameraMode === "single") await saveSettings({ cameraDeviceId: real || null });
       }
       setCamStatus("active");
@@ -5100,7 +5150,7 @@
       if (!f || !f.enabled) return;
       const roi = { x: f.x * size.w, y: f.y * size.h, w: f.w * size.w, h: f.h * size.h };
       const r = Seg.decodeField(clean, roi, { digits: f.digits, decimals: f.decimals, slantDeg: cal.slantDeg, lightSegments: cal.lightSegments, format: key === "time" ? "time" : "number" });
-      fields[key] = { text: r.text, confidence: r.confidence };
+      fields[key] = { text: r.text, confidence: r.confidence, alts: r.alts || [] };
       details[key] = r;
     });
     const thumb = Seg.thumbnail(raw);
@@ -5247,6 +5297,11 @@
     const now = Date.now(), S = App.settings, cache = {}, results = [];
     try {
       const active = App.sensors.filter((s) => s.enabled);
+      // luz de lectura (enchufe TP-Link): se enciende, se espera a que la cámara ajuste la exposición, y se apaga al final
+      if (S.frameSource === "camera" && window.MonThermalUI && window.MonThermalUI.readingLight) {
+        const lead = await window.MonThermalUI.readingLight(true);
+        if (lead) { App.lightOn = true; await new Promise((r) => setTimeout(r, Math.min(lead, 60000))); }
+      }
       const frames = new Map(active.map((s) => [s.id, grabFrame(s, cache, now, true)]));
       trackFrames((s) => frames.get(s.id));
       // fotogramas extra para votar (solo cámara: una imagen fija o la simulación no cambian)
@@ -5258,6 +5313,7 @@
           active.forEach((s) => { const f = grabFrame(s, c2, now, true); if (f && !f.error) extra.get(s.id).push(f); });
         }
       }
+      if (App.lightOn) { App.lightOn = false; window.MonThermalUI.readingLight(false); } // ya están las fotos
       for (const sensor of active) {
         const fr = frames.get(sensor.id);
         let capture;
@@ -5307,6 +5363,7 @@
     } catch (e) {
       toast("Error en el ciclo de lectura: " + (e && e.message ? e.message : e), "crit");
     } finally {
+      if (App.lightOn) { App.lightOn = false; window.MonThermalUI.readingLight(false); }
       App.busy = false;
       if (App.running) App.nextAt = now + S.intervalSec * 1000;
       renderHeader();
@@ -5796,7 +5853,7 @@
     });
     $("#camStart").addEventListener("click", startCameras);
     $("#camStop").addEventListener("click", async () => { if (App.running) await setRunning(false); stopCameras(); });
-    $("#camRefresh").addEventListener("click", refreshDevices);
+    $("#camRefresh").addEventListener("click", async () => { await refreshDevices(true); toast(App.cam.devices.length + (App.cam.devices.length === 1 ? " cámara encontrada" : " cámaras encontradas") + ". Elige en «Cámara» la que leerá los sensores.", "info"); });
     $("#imgFile").addEventListener("change", (e) => {
       const f = e.target.files && e.target.files[0];
       if (!f) return;
@@ -7405,6 +7462,9 @@
         boxes.map((b, i) => boxRow(b, i, profiles, sensors)).join("") +
         '</tbody></table></div><p class="form-err" hidden></p><p class="hint" style="padding:0 16px 14px">El HS105 debe estar en la misma red Wi-Fi (2,4 GHz) que este computador. Usa una IP fija (reserva DHCP en el router). El enchufe nunca se expone a internet: solo este equipo le habla por la red local. Tipo <b>simulado</b> = enchufe virtual para pruebas.</p></form>' +
 
+      // enchufes adicionales (luces)
+      plugsPanel(st ? st.plugs || [] : []) +
+
       // perfiles
       '<form class="panel" id="thProfiles"><header><h2>Perfiles térmicos · parámetros iniciales de producción</h2><div class="spacer"></div><button class="btn primary" type="submit">Guardar</button></header>' +
         '<div class="table-scroll"><table class="compact"><thead><tr><th>Etapa</th><th>Objetivo</th><th>Mín. op.</th><th>Máx. op.</th><th>Enciende ≤</th><th>Apaga ≥</th><th>Alerta</th><th>Crítico</th><th>Recupera ≤</th><th>HR mín.</th><th>HR máx.</th></tr></thead><tbody>' +
@@ -7430,8 +7490,75 @@
     bindModeButtons(host);
     bindSimulator(profiles);
     bindForms(boxes, profiles, control);
+    bindPlugs(st ? st.plugs || [] : []);
     const sel = document.getElementById("thChartBox");
     if (sel) { sel.addEventListener("change", () => drawChart(sel.value)); drawChart(sel.value); }
+  }
+
+  const PLUG_UI = { ON: ["ENCENDIDO", "warn"], OFF: ["APAGADO", "muted"], UNREACHABLE: ["SIN COMUNICACIÓN", "crit"], UNKNOWN: ["—", "muted"] };
+  function plugRow(p, i) {
+    const sch = p.schedule || {}, ui = PLUG_UI[p.state] || PLUG_UI.UNKNOWN, t = (f, v, ph) => '<input data-f="' + f + '" value="' + H.esc(v || "") + '" placeholder="' + ph + '" style="width:62px">';
+    return '<tr data-i="' + i + '"><td><input type="checkbox" data-f="enabled"' + (p.enabled ? " checked" : "") + ' aria-label="Activo"></td>' +
+      '<td><input data-f="name" value="' + H.esc(p.name || "") + '" maxlength="40" style="width:120px"></td>' +
+      '<td><select data-f="type">' + [["hs105", "TP-Link Kasa"], ["sim", "Simulado"]].map((o) => '<option value="' + o[0] + '"' + ((p.type || "hs105") === o[0] ? " selected" : "") + ">" + o[1] + "</option>").join("") + "</select></td>" +
+      '<td><input data-f="host" value="' + H.esc(p.host || "") + '" placeholder="192.168.x.x" style="width:120px"></td>' +
+      "<td>" + t("on", sch.on, "18:00") + " a " + t("off", sch.off, "06:00") + "</td>" +
+      '<td><label><input type="checkbox" data-f="readingLight"' + (p.readingLight ? " checked" : "") + "> sí</label> " + t("lightFrom", p.lightFrom, "18:00") + " a " + t("lightTo", p.lightTo, "06:00") +
+        ' · espera <input data-f="leadSec" type="number" min="1" max="60" value="' + H.esc(p.leadSec || 5) + '" style="width:50px"> s</td>' +
+      '<td><span class="chip ' + ui[1] + '">' + ui[0] + "</span></td>" +
+      '<td class="row-actions"><button class="btn small" type="button" data-ptest="' + i + '">Probar</button>' +
+        (p.id ? '<button class="btn small" type="button" data-pon="' + H.esc(p.id) + '">Encender</button><button class="btn small" type="button" data-poff="' + H.esc(p.id) + '">Apagar</button>' : "") + "</td></tr>";
+  }
+  function plugsPanel(plugs) {
+    return '<form class="panel" id="thPlugs"><header><h2>Enchufes TP-Link adicionales (luces, lámparas)</h2><div class="spacer"></div>' +
+      '<button class="btn" type="button" id="thFind">Buscar enchufes en la red</button><button class="btn" type="button" id="thAddPlug">+ Enchufe</button><button class="btn primary" type="submit">Guardar</button></header>' +
+      '<div id="thFound"></div>' +
+      '<div class="table-scroll"><table class="compact"><thead><tr><th>Activo</th><th>Nombre</th><th>Tipo</th><th>IP</th><th>Horario (enciende a apaga)</th><th>Luz para leer los sensores (franja)</th><th>Estado</th><th></th></tr></thead><tbody>' +
+      plugs.map(plugRow).join("") +
+      '</tbody></table></div><p class="form-err" hidden></p><p class="hint" style="padding:0 16px 14px">' +
+      "<b>Horario</b>: el enchufe se enciende y se apaga solo a esas horas (déjalo vacío si no lo quieres). " +
+      "<b>Luz para leer los sensores</b>: en cada lectura la app enciende esta luz, espera los segundos indicados, toma las fotos y la vuelve a apagar; solo dentro de la franja (p. ej. 18:00 a 06:00, de noche). Si ya estaba encendida, no la toca. Si la app se cierra con la luz encendida, se apaga sola a los 10 minutos. " +
+      "Funciona con enchufes TP-Link <b>Kasa</b> (HS100, HS103, HS105, HS110, KP105, KP115…) en la misma red Wi-Fi 2,4 GHz. Los enchufes <b>Tapo</b> (P100, P105, P110) usan otro protocolo y aún no son compatibles. Las lámparas de calor de cada caja se configuran arriba, en «Cajas, sensores y enchufes».</p></form>";
+  }
+
+  function bindPlugs(plugs) {
+    const fp = document.getElementById("thPlugs");
+    if (!fp) return;
+    const collect = () => [...fp.querySelectorAll("tbody tr")].map((tr, k) => {
+      const g = (f) => tr.querySelector('[data-f="' + f + '"]'), prev = plugs[Number(tr.dataset.i)] || {};
+      return { id: prev.id || "enchufe-" + Date.now().toString(36) + k, name: g("name").value.trim() || "Enchufe " + (k + 1), enabled: g("enabled").checked, type: g("type").value, host: g("host").value.trim(),
+        schedule: { on: g("on").value.trim(), off: g("off").value.trim() }, readingLight: g("readingLight").checked, lightFrom: g("lightFrom").value.trim(), lightTo: g("lightTo").value.trim(), leadSec: Number(g("leadSec").value) || 5 };
+    });
+    const addRow = (p) => { const list = collect(); fp.querySelector("tbody").insertAdjacentHTML("beforeend", plugRow(p, list.length)); };
+    fp.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      try { S.status = await gw("PUT", "/api/config", { plugs: collect() }); formErr(fp, ""); H.toast("Enchufes guardados."); render(); } catch (e) { formErr(fp, e.message); }
+    });
+    document.getElementById("thAddPlug").addEventListener("click", () => addRow({ enabled: true, type: "hs105", host: "", name: "", leadSec: 5 }));
+    document.getElementById("thFind").addEventListener("click", async (ev) => {
+      const box = document.getElementById("thFound"), btn = ev.currentTarget;
+      btn.disabled = true; box.innerHTML = '<p class="hint" style="padding:0 16px">Buscando enchufes TP-Link Kasa en la red…</p>';
+      try {
+        const r = await gw("GET", "/api/discover"), known = collect().map((p) => p.host);
+        const fresh = r.plugs.filter((p) => known.indexOf(p.host) < 0);
+        box.innerHTML = '<p class="hint" style="padding:0 16px">' + (r.plugs.length ? "Encontrados: " + r.plugs.map((p) => "<b>" + H.esc(p.alias) + "</b> (" + H.esc(p.model) + ", " + H.esc(p.host) + ")").join(" · ") + (fresh.length ? ". Se agregaron a la tabla los nuevos: revisa y toca Guardar." : ". Ya están en la tabla o en las cajas.") : "No se encontró ningún enchufe Kasa. Revisa que esté en la misma red Wi-Fi y configurado con la app Kasa (los Tapo no aparecen aquí).") + "</p>";
+        fresh.forEach((p) => addRow({ enabled: true, type: "hs105", host: p.host, name: p.alias, leadSec: 5 }));
+      } catch (e) { box.innerHTML = '<p class="note warn">Gateway no disponible: ' + H.esc(e.message) + "</p>"; }
+      btn.disabled = false;
+    });
+    fp.addEventListener("click", async (ev) => {
+      const b = ev.target.closest("button");
+      if (!b) return;
+      if (b.dataset.ptest != null) {
+        const tr = b.closest("tr");
+        try { const r = await gw("POST", "/api/test-device", { type: tr.querySelector('[data-f="type"]').value, host: tr.querySelector('[data-f="host"]').value.trim() }); H.toast(r.ok ? "Enchufe OK: " + (r.info ? r.info.alias + " · " + r.info.model + " · " + (r.info.relay ? "encendido" : "apagado") : "sin datos") : "No responde: " + r.error, r.ok ? "" : "crit"); }
+        catch (e) { H.toast("Gateway no disponible: " + e.message, "crit"); }
+      } else if (b.dataset.pon || b.dataset.poff) {
+        const id = b.dataset.pon || b.dataset.poff;
+        try { const r = await gw("POST", "/api/plug/" + id, { on: !!b.dataset.pon }); H.toast(r.ok ? "Enchufe " + (r.state === "ON" ? "encendido." : "apagado.") : "El enchufe no responde.", r.ok ? "" : "crit"); render(); }
+        catch (e) { H.toast("No se pudo: " + e.message, "crit"); }
+      }
+    });
   }
 
   function num(label, key, obj) {
@@ -7548,9 +7675,17 @@
       ].filter(Boolean).join(" · ")) + ". El consumo eléctrico no se estima: el HS105 no lo mide.</p>";
   }
 
+  /** Antes de las fotos: enciende las «luces de lectura» (si las hay y es su franja). Devuelve ms de espera, o 0. */
+  async function readingLight(on) {
+    if (S.online === false && Date.now() - S.lastPoll < 30000) return 0;
+    if (on && S.status && !(S.status.plugs || []).some((p) => p.enabled && p.readingLight)) return 0;
+    try { const r = await gw("POST", "/api/reading-light", { on: !!on }); return on ? r.leadMs || 0 : 0; }
+    catch (e) { return 0; }
+  }
+
   window.MonThermalUI = {
     attach(app, helpers) { App = app; H = helpers; },
-    poll, onCycle, render, dashboardHtml, bindModeButtons,
+    poll, onCycle, render, dashboardHtml, bindModeButtons, readingLight,
     getStatus: () => (S.online ? S.status : null),
     get online() { return S.online; },
   };

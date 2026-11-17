@@ -156,6 +156,9 @@
         boxes.map((b, i) => boxRow(b, i, profiles, sensors)).join("") +
         '</tbody></table></div><p class="form-err" hidden></p><p class="hint" style="padding:0 16px 14px">El HS105 debe estar en la misma red Wi-Fi (2,4 GHz) que este computador. Usa una IP fija (reserva DHCP en el router). El enchufe nunca se expone a internet: solo este equipo le habla por la red local. Tipo <b>simulado</b> = enchufe virtual para pruebas.</p></form>' +
 
+      // enchufes adicionales (luces)
+      plugsPanel(st ? st.plugs || [] : []) +
+
       // perfiles
       '<form class="panel" id="thProfiles"><header><h2>Perfiles térmicos · parámetros iniciales de producción</h2><div class="spacer"></div><button class="btn primary" type="submit">Guardar</button></header>' +
         '<div class="table-scroll"><table class="compact"><thead><tr><th>Etapa</th><th>Objetivo</th><th>Mín. op.</th><th>Máx. op.</th><th>Enciende ≤</th><th>Apaga ≥</th><th>Alerta</th><th>Crítico</th><th>Recupera ≤</th><th>HR mín.</th><th>HR máx.</th></tr></thead><tbody>' +
@@ -181,8 +184,75 @@
     bindModeButtons(host);
     bindSimulator(profiles);
     bindForms(boxes, profiles, control);
+    bindPlugs(st ? st.plugs || [] : []);
     const sel = document.getElementById("thChartBox");
     if (sel) { sel.addEventListener("change", () => drawChart(sel.value)); drawChart(sel.value); }
+  }
+
+  const PLUG_UI = { ON: ["ENCENDIDO", "warn"], OFF: ["APAGADO", "muted"], UNREACHABLE: ["SIN COMUNICACIÓN", "crit"], UNKNOWN: ["—", "muted"] };
+  function plugRow(p, i) {
+    const sch = p.schedule || {}, ui = PLUG_UI[p.state] || PLUG_UI.UNKNOWN, t = (f, v, ph) => '<input data-f="' + f + '" value="' + H.esc(v || "") + '" placeholder="' + ph + '" style="width:62px">';
+    return '<tr data-i="' + i + '"><td><input type="checkbox" data-f="enabled"' + (p.enabled ? " checked" : "") + ' aria-label="Activo"></td>' +
+      '<td><input data-f="name" value="' + H.esc(p.name || "") + '" maxlength="40" style="width:120px"></td>' +
+      '<td><select data-f="type">' + [["hs105", "TP-Link Kasa"], ["sim", "Simulado"]].map((o) => '<option value="' + o[0] + '"' + ((p.type || "hs105") === o[0] ? " selected" : "") + ">" + o[1] + "</option>").join("") + "</select></td>" +
+      '<td><input data-f="host" value="' + H.esc(p.host || "") + '" placeholder="192.168.x.x" style="width:120px"></td>' +
+      "<td>" + t("on", sch.on, "18:00") + " a " + t("off", sch.off, "06:00") + "</td>" +
+      '<td><label><input type="checkbox" data-f="readingLight"' + (p.readingLight ? " checked" : "") + "> sí</label> " + t("lightFrom", p.lightFrom, "18:00") + " a " + t("lightTo", p.lightTo, "06:00") +
+        ' · espera <input data-f="leadSec" type="number" min="1" max="60" value="' + H.esc(p.leadSec || 5) + '" style="width:50px"> s</td>' +
+      '<td><span class="chip ' + ui[1] + '">' + ui[0] + "</span></td>" +
+      '<td class="row-actions"><button class="btn small" type="button" data-ptest="' + i + '">Probar</button>' +
+        (p.id ? '<button class="btn small" type="button" data-pon="' + H.esc(p.id) + '">Encender</button><button class="btn small" type="button" data-poff="' + H.esc(p.id) + '">Apagar</button>' : "") + "</td></tr>";
+  }
+  function plugsPanel(plugs) {
+    return '<form class="panel" id="thPlugs"><header><h2>Enchufes TP-Link adicionales (luces, lámparas)</h2><div class="spacer"></div>' +
+      '<button class="btn" type="button" id="thFind">Buscar enchufes en la red</button><button class="btn" type="button" id="thAddPlug">+ Enchufe</button><button class="btn primary" type="submit">Guardar</button></header>' +
+      '<div id="thFound"></div>' +
+      '<div class="table-scroll"><table class="compact"><thead><tr><th>Activo</th><th>Nombre</th><th>Tipo</th><th>IP</th><th>Horario (enciende a apaga)</th><th>Luz para leer los sensores (franja)</th><th>Estado</th><th></th></tr></thead><tbody>' +
+      plugs.map(plugRow).join("") +
+      '</tbody></table></div><p class="form-err" hidden></p><p class="hint" style="padding:0 16px 14px">' +
+      "<b>Horario</b>: el enchufe se enciende y se apaga solo a esas horas (déjalo vacío si no lo quieres). " +
+      "<b>Luz para leer los sensores</b>: en cada lectura la app enciende esta luz, espera los segundos indicados, toma las fotos y la vuelve a apagar; solo dentro de la franja (p. ej. 18:00 a 06:00, de noche). Si ya estaba encendida, no la toca. Si la app se cierra con la luz encendida, se apaga sola a los 10 minutos. " +
+      "Funciona con enchufes TP-Link <b>Kasa</b> (HS100, HS103, HS105, HS110, KP105, KP115…) en la misma red Wi-Fi 2,4 GHz. Los enchufes <b>Tapo</b> (P100, P105, P110) usan otro protocolo y aún no son compatibles. Las lámparas de calor de cada caja se configuran arriba, en «Cajas, sensores y enchufes».</p></form>";
+  }
+
+  function bindPlugs(plugs) {
+    const fp = document.getElementById("thPlugs");
+    if (!fp) return;
+    const collect = () => [...fp.querySelectorAll("tbody tr")].map((tr, k) => {
+      const g = (f) => tr.querySelector('[data-f="' + f + '"]'), prev = plugs[Number(tr.dataset.i)] || {};
+      return { id: prev.id || "enchufe-" + Date.now().toString(36) + k, name: g("name").value.trim() || "Enchufe " + (k + 1), enabled: g("enabled").checked, type: g("type").value, host: g("host").value.trim(),
+        schedule: { on: g("on").value.trim(), off: g("off").value.trim() }, readingLight: g("readingLight").checked, lightFrom: g("lightFrom").value.trim(), lightTo: g("lightTo").value.trim(), leadSec: Number(g("leadSec").value) || 5 };
+    });
+    const addRow = (p) => { const list = collect(); fp.querySelector("tbody").insertAdjacentHTML("beforeend", plugRow(p, list.length)); };
+    fp.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      try { S.status = await gw("PUT", "/api/config", { plugs: collect() }); formErr(fp, ""); H.toast("Enchufes guardados."); render(); } catch (e) { formErr(fp, e.message); }
+    });
+    document.getElementById("thAddPlug").addEventListener("click", () => addRow({ enabled: true, type: "hs105", host: "", name: "", leadSec: 5 }));
+    document.getElementById("thFind").addEventListener("click", async (ev) => {
+      const box = document.getElementById("thFound"), btn = ev.currentTarget;
+      btn.disabled = true; box.innerHTML = '<p class="hint" style="padding:0 16px">Buscando enchufes TP-Link Kasa en la red…</p>';
+      try {
+        const r = await gw("GET", "/api/discover"), known = collect().map((p) => p.host);
+        const fresh = r.plugs.filter((p) => known.indexOf(p.host) < 0);
+        box.innerHTML = '<p class="hint" style="padding:0 16px">' + (r.plugs.length ? "Encontrados: " + r.plugs.map((p) => "<b>" + H.esc(p.alias) + "</b> (" + H.esc(p.model) + ", " + H.esc(p.host) + ")").join(" · ") + (fresh.length ? ". Se agregaron a la tabla los nuevos: revisa y toca Guardar." : ". Ya están en la tabla o en las cajas.") : "No se encontró ningún enchufe Kasa. Revisa que esté en la misma red Wi-Fi y configurado con la app Kasa (los Tapo no aparecen aquí).") + "</p>";
+        fresh.forEach((p) => addRow({ enabled: true, type: "hs105", host: p.host, name: p.alias, leadSec: 5 }));
+      } catch (e) { box.innerHTML = '<p class="note warn">Gateway no disponible: ' + H.esc(e.message) + "</p>"; }
+      btn.disabled = false;
+    });
+    fp.addEventListener("click", async (ev) => {
+      const b = ev.target.closest("button");
+      if (!b) return;
+      if (b.dataset.ptest != null) {
+        const tr = b.closest("tr");
+        try { const r = await gw("POST", "/api/test-device", { type: tr.querySelector('[data-f="type"]').value, host: tr.querySelector('[data-f="host"]').value.trim() }); H.toast(r.ok ? "Enchufe OK: " + (r.info ? r.info.alias + " · " + r.info.model + " · " + (r.info.relay ? "encendido" : "apagado") : "sin datos") : "No responde: " + r.error, r.ok ? "" : "crit"); }
+        catch (e) { H.toast("Gateway no disponible: " + e.message, "crit"); }
+      } else if (b.dataset.pon || b.dataset.poff) {
+        const id = b.dataset.pon || b.dataset.poff;
+        try { const r = await gw("POST", "/api/plug/" + id, { on: !!b.dataset.pon }); H.toast(r.ok ? "Enchufe " + (r.state === "ON" ? "encendido." : "apagado.") : "El enchufe no responde.", r.ok ? "" : "crit"); render(); }
+        catch (e) { H.toast("No se pudo: " + e.message, "crit"); }
+      }
+    });
   }
 
   function num(label, key, obj) {
@@ -299,9 +369,17 @@
       ].filter(Boolean).join(" · ")) + ". El consumo eléctrico no se estima: el HS105 no lo mide.</p>";
   }
 
+  /** Antes de las fotos: enciende las «luces de lectura» (si las hay y es su franja). Devuelve ms de espera, o 0. */
+  async function readingLight(on) {
+    if (S.online === false && Date.now() - S.lastPoll < 30000) return 0;
+    if (on && S.status && !(S.status.plugs || []).some((p) => p.enabled && p.readingLight)) return 0;
+    try { const r = await gw("POST", "/api/reading-light", { on: !!on }); return on ? r.leadMs || 0 : 0; }
+    catch (e) { return 0; }
+  }
+
   window.MonThermalUI = {
     attach(app, helpers) { App = app; H = helpers; },
-    poll, onCycle, render, dashboardHtml, bindModeButtons,
+    poll, onCycle, render, dashboardHtml, bindModeButtons, readingLight,
     getStatus: () => (S.online ? S.status : null),
     get online() { return S.online; },
   };

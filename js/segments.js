@@ -503,23 +503,36 @@
       var ch = best.ch, conf = Math.max(0, Math.min(1, second.d - best.d));
       if (best.d > 2.2) { ch = "?"; conf = 0; } // no se parece a ningún dígito
       if (ch !== " ") seenVisible = true;
-      out.push({ ch: ch, conf: conf, bits: bits });
+      // 2.ª opción si está cerca (1↔7 difieren en un solo segmento): sirve para corregir por contexto
+      var alt = ranked.slice(1, 3).filter(function (r) { return r.d - best.d < 1.2 && /\d/.test(r.ch); }).map(function (r) { return r.ch; });
+      out.push({ ch: ch, conf: conf, bits: bits, alt: alt });
     }
 
     var chars = out.map(function (o) { return o.ch; });
     var first = chars.findIndex(function (c) { return c !== " "; });
     if (first < 0) return { text: "", confidence: 0, contrast: contrast100, blank: true, digits: out };
-    var body = chars.slice(first).join("");
-    var text;
-    if (opts.format === "time") {
-      text = body.length > 2 ? body.slice(0, -2) + ":" + body.slice(-2) : body;
-    } else if (decimals > 0) {
-      var sign = body[0] === "-" ? "-" : "", num = sign ? body.slice(1) : body;
-      while (num.length <= decimals) num = "0" + num;
-      text = sign + num.slice(0, num.length - decimals) + "." + num.slice(num.length - decimals);
-    } else {
-      text = body;
-    }
+    var fmt = function (cs) {
+      var f = cs.findIndex(function (c) { return c !== " "; });
+      if (f < 0) return "";
+      var body = cs.slice(f).join("");
+      if (opts.format === "time") return body.length > 2 ? body.slice(0, -2) + ":" + body.slice(-2) : body;
+      if (decimals > 0) {
+        var sign = body[0] === "-" ? "-" : "", num = sign ? body.slice(1) : body;
+        while (num.length <= decimals) num = "0" + num;
+        return sign + num.slice(0, num.length - decimals) + "." + num.slice(num.length - decimals);
+      }
+      return body;
+    };
+    var text = fmt(chars);
+    // lecturas alternativas: cambiando UN dígito dudoso por su 2.ª opción
+    var alts = [];
+    out.forEach(function (o, i) {
+      (o.alt || []).forEach(function (a) {
+        var cs = chars.slice(); cs[i] = a;
+        var t = fmt(cs);
+        if (t && t !== text && alts.indexOf(t) < 0) alts.push(t);
+      });
+    });
 
     // Letras mezcladas con cifras («L1.9», «7H») no existen en el HTC-2: se vuelve a leer solo con
     // cifras. Solo se aceptan letras cuando TODO el valor lo es (LL.L / HH.H = fuera de escala).
@@ -531,7 +544,7 @@
     var minConf = Math.min.apply(null, confVals), avgConf = meanOf(confVals);
     var contrastFactor = Math.min(1, contrast / 60);
     var confidence = Math.round((0.5 * minConf + 0.5 * avgConf) * contrastFactor * 1000) / 10;
-    return { text: text, confidence: confidence, contrast: contrast100, blank: false, digits: out };
+    return { text: text, confidence: confidence, contrast: contrast100, blank: false, digits: out, alts: alts };
   }
 
   // ─────────────────────── detección de pantallas ───────────────────────
