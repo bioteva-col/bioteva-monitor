@@ -112,7 +112,7 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
   // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
-  const APP_VERSION = "v19", APP_DATE = "17-nov-2026";
+  const APP_VERSION = "v20", APP_DATE = "18-nov-2026";
   const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
   const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   /**
@@ -211,18 +211,36 @@
         try { const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); tmp.getTracks().forEach((t) => t.stop()); all = await navigator.mediaDevices.enumerateDevices(); }
         catch (e) { toast(cameraErrorMessage(e), "warn"); }
       }
-      App.cam.devices = all.filter((d) => d.kind === "videoinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || "Camera " + (i + 1) }));
+      App.cam.devices = all.filter((d) => d.kind === "videoinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || "Camera " + (i + 1), named: !!d.label }));
     } catch (e) { App.cam.devices = []; }
     renderCameraForm();
+    renderCamPicker();
   }
+
+  // Integradas del portátil: se prefieren las EXTERNAS (USB) cuando nadie eligió todavía.
+  const isBuiltIn = (label) => /integrat|integrad|built.?in|facetime|internal|interna|front|frontal|hd webcam$|truevision|hp (hd|wide)|lenovo easycamera|chicony|realtek|bison|azurewave|sunplus/i.test(label || "");
+  /**
+   * Resuelve qué cámara abrir: 1) el id guardado si existe en ESTE navegador; 2) si no, la que tiene el
+   * mismo nombre (el id de una cámara cambia entre la extensión, la app instalada y la página); 3) sin
+   * elección de la persona, una cámara externa antes que la integrada del portátil.
+   */
+  function resolveDevice(id, label) {
+    const list = App.cam.devices.filter((d) => d.deviceId);
+    if (!list.length) return id || null;
+    if (id && list.some((d) => d.deviceId === id)) return id;
+    if (label) { const byName = list.find((d) => d.label === label) || list.find((d) => d.label.replace(/\s*\(.*\)$/, "") === label.replace(/\s*\(.*\)$/, "")); if (byName) return byName.deviceId; }
+    if (!App.settings.cameraChosen) { const ext = list.find((d) => d.named && !isBuiltIn(d.label)); if (ext) return ext.deviceId; }
+    return id || null;
+  }
+  const labelOf = (id) => { const d = App.cam.devices.find((x) => x.deviceId === id); return d && d.named ? d.label : null; };
 
   function wantedDeviceIds() {
     const S = App.settings;
     if (S.cameraMode === "dual") {
-      const ids = [sensorById("A"), sensorById("B")].filter((s) => s && s.enabled).map((s) => s.cameraDeviceId || null);
+      const ids = [sensorById("A"), sensorById("B")].filter((s) => s && s.enabled).map((s) => resolveDevice(s.cameraDeviceId, s.cameraLabel));
       return ids.filter((v, i) => ids.indexOf(v) === i);
     }
-    return [S.cameraDeviceId || null];
+    return [resolveDevice(S.cameraDeviceId, S.cameraLabel)];
   }
 
   function stopCameras() {
@@ -237,6 +255,7 @@
     stopCameras();
     App.cam.lastTry = Date.now();
     setCamStatus("starting");
+    if (!App.cam.devices.some((d) => d.named)) { try { await refreshDevices(true); } catch (e) { /* sin nombres: se usa el id guardado */ } }
     const [w, h] = App.settings.resolution.split("x").map(Number);
     try {
       for (const id of wantedDeviceIds()) {
@@ -251,7 +270,7 @@
           if (!id || (e.name !== "OverconstrainedError" && e.name !== "NotFoundError")) throw e;
           // La cámara elegida ya no está: seguir con la predeterminada en vez de quedar sin lecturas.
           stream = await navigator.mediaDevices.getUserMedia(constraints(null));
-          toast("La cámara configurada no está disponible; se usa la cámara predeterminada.", "warn");
+          toast("La cámara configurada no está disponible; se usa la predeterminada. Elige la cámara en Inicio → Cámara.", "warn");
         }
         const video = document.createElement("video");
         video.muted = true;
@@ -263,10 +282,12 @@
         track.addEventListener("ended", () => setCamStatus("error", "La cámara se desconectó o dejó de enviar imagen (" + track.label + ")."));
         const st = (track.getSettings && track.getSettings()) || {};
         App.cam.streams.push({ requested: id, deviceId: real, label: (track.label || "Cámara") + (st.width ? " · " + st.width + "×" + st.height : ""), stream, video, canvas: document.createElement("canvas") });
-        if (!id && App.settings.cameraMode === "single") await saveSettings({ cameraDeviceId: real || null });
+        if (App.settings.cameraMode === "single" && real && real !== App.settings.cameraDeviceId) await saveSettings({ cameraDeviceId: real, cameraLabel: track.label || App.settings.cameraLabel || null });
+        else if (App.settings.cameraMode === "single" && track.label && !App.settings.cameraLabel) await saveSettings({ cameraLabel: track.label });
       }
       setCamStatus("active");
       await refreshDevices();
+      renderCamPicker();
     } catch (e) {
       stopCameras();
       setCamStatus("error", cameraErrorMessage(e));
@@ -968,6 +989,7 @@
     const keepH = host.offsetHeight, keepY = window.scrollY;
     if (keepH) host.style.minHeight = keepH + "px";
     host.innerHTML =
+      '<div id="camPicker" hidden></div>' +
       '<div class="home"><div class="boxes">' + cards.join("") + "</div>" + todoHtml + "</div>" +
       chartsHtml + profHtml +
       '<div class="trio">' +
@@ -976,6 +998,7 @@
         lampsHtml + camHtml +
       "</div>" + lastRecordsHtml(recent3h.length >= 12 ? recent3h : today.length >= 12 ? today : await App.store.readingsRange(now - 2 * DAY, now));
 
+    renderCamPicker();
     requestAnimationFrame(() => { host.style.minHeight = ""; if (Math.abs(window.scrollY - keepY) > 2) window.scrollTo(0, keepY); });
     $$("[data-caja]", host).forEach((b) => b.addEventListener("click", () => { App.caja.sensor = b.dataset.caja; App.caja.period = "today"; showView("caja"); }));
     $$("[data-act]", host).forEach((btn) => btn.addEventListener("click", () => {
@@ -1094,6 +1117,35 @@
 
   // ─────────────────────────── CÁMARA (vista) ───────────────────────────
 
+  /** La persona elige la cámara (Ajustes o la barra de Inicio): se guarda id + nombre y se abre ya. */
+  async function chooseCamera(id) {
+    await saveSettings({ cameraDeviceId: id || null, cameraLabel: labelOf(id), cameraChosen: true });
+    if (App.settings.frameSource === "camera") await startCameras();
+    renderCameraForm();
+    renderCamPicker();
+  }
+  /** Barra «Cámara de monitoreo» en Inicio: muestra cuál se usa y deja cambiarla en un clic. */
+  function renderCamPicker() {
+    const host = document.getElementById("camPicker");
+    if (!host) return;
+    const S = App.settings;
+    if (S.frameSource !== "camera" || S.cameraMode !== "single") { host.hidden = true; return; }
+    const devs = App.cam.devices.filter((d) => d.deviceId);
+    const cur = (App.cam.streams[0] && App.cam.streams[0].deviceId) || resolveDevice(S.cameraDeviceId, S.cameraLabel);
+    const many = devs.length > 1, unsure = many && !S.cameraChosen;
+    host.hidden = false;
+    host.className = "banner cam-picker" + (unsure ? " warn" : "");
+    host.innerHTML = "<b>📷 Cámara de monitoreo:</b> " +
+      (devs.length
+        ? '<select id="camPick" aria-label="Cámara de monitoreo">' + devs.map((d) => '<option value="' + esc(d.deviceId) + '"' + (d.deviceId === cur ? " selected" : "") + ">" + esc(d.label) + (isBuiltIn(d.label) ? " (integrada)" : "") + "</option>").join("") + "</select>"
+        : '<span class="muted-text">aún no hay permiso para ver las cámaras</span>') +
+      ' <button class="btn small" type="button" id="camPickFind">Buscar cámaras</button>' +
+      (unsure ? ' <span>Hay ' + devs.length + " cámaras: elige la que ve los sensores.</span>" : "");
+    const sel = host.querySelector("#camPick");
+    if (sel) sel.addEventListener("change", (e) => chooseCamera(e.target.value));
+    host.querySelector("#camPickFind").addEventListener("click", async () => { await refreshDevices(true); toast(App.cam.devices.filter((d) => d.deviceId).length + " cámara(s) encontradas."); });
+  }
+
   function renderCameraForm() {
     const S = App.settings;
     $$('input[name="frameSource"]').forEach((r) => (r.checked = r.value === S.frameSource));
@@ -1129,9 +1181,9 @@
       }),
     );
     $("#camMode").addEventListener("change", async (e) => { await saveSettings({ cameraMode: e.target.value }); renderCameraForm(); if (App.cam.status === "active") startCameras(); });
-    $("#camSelect").addEventListener("change", async (e) => { await saveSettings({ cameraDeviceId: e.target.value || null }); if (App.cam.status === "active") startCameras(); });
+    $("#camSelect").addEventListener("change", (e) => chooseCamera(e.target.value));
     ["A", "B"].forEach((id) =>
-      $("#camSel" + id).addEventListener("change", async (e) => { sensorById(id).cameraDeviceId = e.target.value || null; await saveSensors(); if (App.cam.status === "active") startCameras(); }),
+      $("#camSel" + id).addEventListener("change", async (e) => { const s = sensorById(id); s.cameraDeviceId = e.target.value || null; s.cameraLabel = labelOf(s.cameraDeviceId); await saveSensors(); await saveSettings({ cameraChosen: true }); if (App.cam.status === "active") startCameras(); }),
     );
     $("#camRes").addEventListener("change", async (e) => { await saveSettings({ resolution: e.target.value }); if (App.cam.status === "active") startCameras(); });
     $("#camFps").addEventListener("change", async (e) => {
@@ -1386,7 +1438,7 @@
         const cell = $("#calApp_" + k);
         if (cell.textContent !== shown) cell.textContent = shown;
         cell.classList.toggle("doubt", !ok);
-        inp.placeholder = ok ? showRead(read, dec) : "escribe";
+        inp.placeholder = ok ? "¿" + showRead(read, dec) + "?" : "escribe";
         const typed = inp.value.trim(), off = typed !== "" && !sameRead(k, typed, read);
         inp.classList.toggle("bad", off);
         if (off) bad.push(L.FIELD_LABELS[k] + ": la app lee «" + (read ? showRead(read, dec) : "nada") + "» y tú ves «" + typed + "»");
@@ -1698,6 +1750,10 @@
         msg.className = "msg warn";
         if (!typedAny.length) return;
       }
+      // Valores escritos por la persona = referencia para las próximas lecturas (cambios graduales desde ahí).
+      const typedVals = {};
+      CMP_KEYS.forEach(([k, sel]) => { if (k === "time") return; const v = parseNum($(sel).value.trim()); if (v != null) typedVals[k] = k === "humidity" ? Math.round(v) : Math.round(v * 10) / 10; });
+      if (Object.keys(typedVals).length) d.anchor = { ts: Date.now(), values: typedVals };
       if (!typedAny.length) { persistDraft(); return setCalStep(3); }
       msg.textContent = "Ajustando (unos segundos)…"; msg.className = "msg";
       $("#exFit").disabled = true;

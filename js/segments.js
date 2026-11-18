@@ -414,6 +414,27 @@
     return best >= 0 ? best : floor; // solo había línea divisoria: el segmento está apagado
   }
 
+  /**
+   * 1 ↔ 7: solo los distingue la barra de arriba. Un 7 real la tiene a lo ANCHO del dígito; un 1
+   * solo tiene tinta en una columna estrecha (su trazo vertical), aunque el cuadro esté corrido.
+   * Devuelve la fracción del ancho con tinta en la mejor fila de la parte alta (0–1), sin contar
+   * filas que siguen de largo fuera de la celda (línea divisoria o marco del display).
+   */
+  function topBarCoverage(img, roi, ci, digits, tanSlant, light, lo, contrast) {
+    var cellW = roi.w / digits, dw = cellW * (1 - 2 * PADX), cols = 14, rows = 10, best = 0;
+    var inkAt = function (u, v) { var p = digitPoint(roi, ci, digits, u, v, tanSlant), val = sample(img, p.x, p.y); return ((light ? val : 255 - val) - lo) / contrast; };
+    for (var r = 0; r < rows; r++) {
+      var v = -0.16 + (0.34 * (r + 0.5)) / rows, on = 0; // también un poco por ENCIMA del cuadro (cuadro corrido hacia abajo)
+      // tramo CONTINUO más largo con tinta (la barra del 7 es una sola pieza; un trazo vecino que asoma no)
+      for (var c = 0, run = 0; c < cols; c++) { if (inkAt(0.04 + (0.92 * (c + 0.5)) / cols, v) > 0.5) { run++; if (run > on) on = run; } else run = 0; }
+      // ¿sigue la tinta por fuera de la celda a ambos lados? entonces es una línea, no la barra del 7
+      var outL = inkAt(-0.14, v) > 0.5 && inkAt(-0.08, v) > 0.5, outR = inkAt(1.08, v) > 0.5 && inkAt(1.14, v) > 0.5;
+      if (outL && outR) continue;
+      best = Math.max(best, on / cols);
+    }
+    return dw > 0 ? best : 0;
+  }
+
   var meanOf = function (arr) { var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i]; return arr.length ? s / arr.length : 0; };
   var median = function (sorted) { return sorted.length ? sorted[sorted.length >> 1] : 0; };
 
@@ -505,6 +526,16 @@
       if (ch !== " ") seenVisible = true;
       // 2.ª opción si está cerca (1↔7 difieren en un solo segmento): sirve para corregir por contexto
       var alt = ranked.slice(1, 3).filter(function (r) { return r.d - best.d < 1.2 && /\d/.test(r.ch); }).map(function (r) { return r.ch; });
+      // 1 ↔ 7: se decide midiendo cuánto del ANCHO cubre la barra de arriba (ver topBarCoverage).
+      if (ch === "1" || ch === "7") {
+        var cov = topBarCoverage(img, roi, ci, digits, tanSlant, light, lo, contrast);
+        if (ch === "7" && cov < 0.3) { ch = "1"; conf = Math.min(conf, 0.6); }
+        else if (ch === "1" && cov > 0.6) { ch = "7"; conf = Math.min(conf, 0.6); }
+        else if (cov >= 0.3 && cov <= 0.6) conf = Math.min(conf, 0.3); // barra a medias: dudoso
+        var other = ch === "1" ? "7" : "1";
+        if (alt.indexOf(other) < 0) alt.unshift(other); // siempre queda la otra opción para corregir por contexto
+        alt = alt.filter(function (a) { return a !== ch; });
+      }
       out.push({ ch: ch, conf: conf, bits: bits, alt: alt });
     }
 

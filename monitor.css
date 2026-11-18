@@ -536,3 +536,6 @@ ol.cal-progress li[data-calstep], ol.cal-progress li[data-calsensor] { cursor: p
 .hour-table summary { cursor: pointer; font-weight: 600; margin-top: 6px; }
 .hour-table table { font-size: 13px; }
 .crit-text { color: var(--crit, #b3261e); }
+/* ── v20: barra de cámara en Inicio ── */
+.cam-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.cam-picker select { max-width: 100%; min-width: 0; flex: 1 1 220px; }

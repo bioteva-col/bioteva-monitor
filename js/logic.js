@@ -239,10 +239,25 @@
   var DEVICE_RANGE = { tempIn: [-10, 50], tempOut: [-50, 70], humidity: [10, 99] };
   function inDeviceRange(key, v) { var r = DEVICE_RANGE[key]; return !r || (v >= r[0] && v <= r[1]); }
   function maxJump(key, s) { return key === "humidity" ? s.maxHumidityJump : s.maxTempJump; }
+  /**
+   * Cambio máximo creíble ENTRE DOS LECTURAS según el tiempo que pasó: la temperatura de una caja
+   * cambia de forma gradual. Temperatura: 1,5 °C + 0,5 °C por minuto (tope: «salto máximo» de Ajustes);
+   * humedad: 5 % + 2 % por minuto (tope: su «salto máximo»). Sin tiempo conocido: el tope.
+   */
+  function jumpLimit(key, s, dtMs) {
+    var cap = maxJump(key, s);
+    if (dtMs == null || !isFinite(dtMs) || dtMs < 0) return cap;
+    var min = dtMs / 60000;
+    return Math.min(cap, key === "humidity" ? 5 + 2 * min : 1.5 + 0.5 * min);
+  }
+  /** Deriva máxima creíble respecto a una referencia de hace horas (temperatura): tope + 4 °C por hora. */
+  function driftLimit(s, dtMs) { return s.maxTempJump + 4 * Math.max(0, dtMs) / 3600000; }
 
   /**
    * Valida el texto OCR de un campo.
-   * ctx: { settings, roi: { digits, decimals }, previous (último valor confiable reciente), previousRaw (valor de la lectura anterior) }
+   * ctx: { settings, roi: { digits, decimals }, previous (último valor confiable reciente), previousRaw (valor de la lectura anterior),
+   *        dtMs (tiempo desde «previous»), recentRaws (valores leídos en las 2 lecturas anteriores, para confirmar un cambio),
+   *        refValue/refAgeMs (referencia de las últimas horas o el valor que la persona escribió al calibrar) }
    */
   function validateField(key, ocr, ctx) {
     var s = ctx.settings;
@@ -270,11 +285,12 @@
     var value = Number(text), confidence = ocr.confidence, flags = [], note;
     var decimals = ctx.roi ? ctx.roi.decimals || 0 : 0;
     var prev = ctx.previous;
+    var lim = jumpLimit(key, s, ctx.dtMs);
 
     // Punto decimal ausente ("315" en un display que siempre muestra "31.5").
     if (decimals > 0 && text.indexOf(".") < 0) {
       var candidate = Math.round((value / Math.pow(10, decimals)) * Math.pow(10, decimals)) / Math.pow(10, decimals);
-      if (prev != null && Math.abs(candidate - prev) <= maxJump(key, s) && plausible(key, candidate, s)) {
+      if (prev != null && Math.abs(candidate - prev) <= lim && plausible(key, candidate, s)) {
         flags.push("OCR_CORRECTION");
         note = "Corrección OCR: \"" + text + "\" interpretado como " + candidate + " (el display muestra " + decimals + " decimal y el valor es coherente con la lectura anterior " + prev + ").";
         value = candidate;
@@ -292,7 +308,7 @@
         .filter(function (t) { return /^-?\d+(\.\d+)?$/.test(t) && (decimals === 0 || t.indexOf(".") >= 0); })
         .map(function (t) { return { t: t, v: Number(t) }; })
         .filter(function (x) { return inRange(x.v); });
-      if (prev != null) c = c.filter(function (x) { return Math.abs(x.v - prev) <= maxJump(key, s); }).sort(function (a, b) { return Math.abs(a.v - prev) - Math.abs(b.v - prev); });
+      if (prev != null) c = c.filter(function (x) { return Math.abs(x.v - prev) <= lim; }).sort(function (a, b) { return Math.abs(a.v - prev) - Math.abs(b.v - prev); });
       else if (c.length !== 1) return null; // sin lectura anterior solo si hay UNA alternativa posible
       return c[0] || null;
     };
@@ -309,16 +325,28 @@
       applyFix(fx, "fuera de escala");
     }
 
-    if (prev != null && Math.abs(value - prev) > maxJump(key, s)) {
-      var confirmedBy = ctx.previousRaw;
-      var confirmed = confirmedBy != null && Math.abs(value - confirmedBy) <= maxJump(key, s) / 2;
-      var fx2 = confirmed ? null : altFix();
+    if (prev != null && Math.abs(value - prev) > lim) {
+      // Un cambio brusco solo se acepta si se SOSTIENE: las 2 lecturas anteriores ya mostraban ese valor
+      // (3 seguidas). Una sola lectura repetida no basta (un dígito mal leído suele repetirse una vez).
+      var raws = ctx.recentRaws || (ctx.previousRaw != null ? [ctx.previousRaw] : []);
+      var confirmed = raws.length >= 2 && raws.every(function (r) { return r != null && Math.abs(value - r) <= Math.max(1, lim / 2); });
+      var fx2 = altFix();
+      if (fx2 && Math.abs(fx2.v - prev) < Math.abs(value - prev)) confirmed = false; // una opción de dígito concuerda mejor: se prefiere
+      else fx2 = confirmed ? null : fx2;
       if (fx2) { applyFix(fx2, "salto de " + signed(value - prev) + " respecto a " + prev); confirmed = true; }
       if (!confirmed) {
         flags.push("IMPROBABLE_JUMP");
-        note = (note ? note + " " : "") + "Salto de " + signed(value - prev) + " respecto a la lectura anterior (" + prev + "); se confirma con la siguiente lectura.";
+        note = (note ? note + " " : "") + "Salto de " + signed(value - prev) + " respecto a la lectura anterior (" + prev + "); los cambios son graduales: se acepta solo si se repite en 3 lecturas seguidas.";
         confidence = Math.min(confidence, s.minConfidence - 1);
       }
+    }
+
+    // Coherencia con las últimas horas (o con el valor que la persona escribió al calibrar): de 21 °C
+    // no se pasa a 70 °C. Si se aleja más de lo creíble para el tiempo transcurrido, queda dudosa.
+    if (key !== "humidity" && ctx.refValue != null && Math.abs(value - ctx.refValue) > driftLimit(s, ctx.refAgeMs || 0)) {
+      flags.push("INCOHERENT");
+      note = (note ? note + " " : "") + "No es coherente con " + ctx.refValue + " °C de " + (ctx.refFromUser ? "la lectura que escribiste al calibrar" : "las últimas horas") + " (cambio de " + signed(value - ctx.refValue) + "). Revisa la calibración si se repite.";
+      confidence = Math.min(confidence, s.minConfidence - 1);
     }
 
     return Object.assign({}, base, {
@@ -374,11 +402,24 @@
         if (!roi || !roi.enabled) return;
         var prevRel = key === "time" ? null : lastReliable(key, recentWindow);
         var prevRawField = prevAny && prevAny.fields && prevAny.fields[key];
+        var previous = prevRel ? prevRel[key] : null, prevTs = prevRel ? prevRel.ts : null;
+        // Valor que la persona escribió al calibrar («Compara»): punto de partida mientras sea reciente.
+        var anc = cal.anchor && cal.anchor.values && cal.anchor.values[key] != null && now - cal.anchor.ts < 6 * 3600000 ? cal.anchor : null;
+        if (key !== "time" && anc && (prevTs == null || anc.ts > prevTs) && now - anc.ts < recentWindow) { previous = anc.values[key]; prevTs = anc.ts; }
+        var recentRaws = history.slice(-2).map(function (h) { var f = h.fields && h.fields[key]; return f && f.value != null ? f.value : null; });
+        var ref = key === "time" || key === "humidity" ? null : lastReliable(key, 6 * 3600000);
+        var refValue = ref ? ref[key] : null, refTs = ref ? ref.ts : null, refFromUser = false;
+        if (key !== "time" && anc && (refTs == null || anc.ts > refTs)) { refValue = anc.values[key]; refTs = anc.ts; refFromUser = true; }
         fields[key] = validateField(key, (cap.fields || {})[key], {
           settings: S,
           roi: roi,
-          previous: prevRel ? prevRel[key] : null,
+          previous: previous,
+          dtMs: prevTs != null ? now - prevTs : null,
           previousRaw: prevRawField && prevRawField.value != null ? prevRawField.value : null,
+          recentRaws: recentRaws.length === 2 ? recentRaws : null,
+          refValue: refValue,
+          refAgeMs: refTs != null ? now - refTs : 0,
+          refFromUser: refFromUser,
         });
       });
     }

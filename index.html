@@ -14,7 +14,7 @@
 
 <header class="top">
   <div class="wrap topbar">
-    <a class="brand" href="#dashboard" data-nav="dashboard"><b>BioTeva</b><span>Monitor</span><small class="app-ver ver-badge">v19</small></a>
+    <a class="brand" href="#dashboard" data-nav="dashboard"><b>BioTeva</b><span>Monitor</span><small class="app-ver ver-badge">v20</small></a>
     <div class="spacer"></div>
     <span class="status-pill" id="statusPill" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="statusText">Detenido</span></span>
     <div class="top-actions">
@@ -199,7 +199,8 @@
       <div class="cal-card">
         <span class="step-n" data-step-n>Paso 2 de 3 · Sensor A</span>
         <h2>Compara con el sensor</h2>
-        <p>Mira la pantalla del sensor y escribe lo que ves. Si algo no coincide, la app se ajusta sola.</p>
+        <p>Mira la pantalla del sensor y <b>escribe lo que ves</b> en «Tú ves». Si algo no coincide, la app se ajusta sola. Lo que escribas queda como punto de partida: las lecturas siguientes deben cambiar de forma gradual desde ahí.</p>
+        <p class="hint">Una casilla vacía significa «la app lee bien ese valor».</p>
         <div class="cmp" id="calCmp">
           <span></span><span class="h">La app lee</span><span class="h">Tú ves</span>
           <label class="lbl" for="exIn">Temp. arriba (IN)</label><span class="app" id="calApp_tempIn">—</span><input id="exIn" class="big-num" inputmode="decimal" autocomplete="off" />
@@ -657,7 +658,7 @@ docker compose -f docker-compose.full.yml up -d</pre><p class="muted-text">Qué 
 <footer class="foot">
   <div class="wrap">
     BioTeva Monitor · Procesamiento 100 % local (cámara → OCR → base en este navegador). No se envían imágenes ni datos a internet.
-    · Versión <span class="app-ver">v19</span>
+    · Versión <span class="app-ver">v20</span>
     <span id="footMode"></span>
   </div>
 </footer>

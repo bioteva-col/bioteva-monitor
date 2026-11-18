@@ -452,6 +452,27 @@
     return best >= 0 ? best : floor; // solo había línea divisoria: el segmento está apagado
   }
 
+  /**
+   * 1 ↔ 7: solo los distingue la barra de arriba. Un 7 real la tiene a lo ANCHO del dígito; un 1
+   * solo tiene tinta en una columna estrecha (su trazo vertical), aunque el cuadro esté corrido.
+   * Devuelve la fracción del ancho con tinta en la mejor fila de la parte alta (0–1), sin contar
+   * filas que siguen de largo fuera de la celda (línea divisoria o marco del display).
+   */
+  function topBarCoverage(img, roi, ci, digits, tanSlant, light, lo, contrast) {
+    var cellW = roi.w / digits, dw = cellW * (1 - 2 * PADX), cols = 14, rows = 10, best = 0;
+    var inkAt = function (u, v) { var p = digitPoint(roi, ci, digits, u, v, tanSlant), val = sample(img, p.x, p.y); return ((light ? val : 255 - val) - lo) / contrast; };
+    for (var r = 0; r < rows; r++) {
+      var v = -0.16 + (0.34 * (r + 0.5)) / rows, on = 0; // también un poco por ENCIMA del cuadro (cuadro corrido hacia abajo)
+      // tramo CONTINUO más largo con tinta (la barra del 7 es una sola pieza; un trazo vecino que asoma no)
+      for (var c = 0, run = 0; c < cols; c++) { if (inkAt(0.04 + (0.92 * (c + 0.5)) / cols, v) > 0.5) { run++; if (run > on) on = run; } else run = 0; }
+      // ¿sigue la tinta por fuera de la celda a ambos lados? entonces es una línea, no la barra del 7
+      var outL = inkAt(-0.14, v) > 0.5 && inkAt(-0.08, v) > 0.5, outR = inkAt(1.08, v) > 0.5 && inkAt(1.14, v) > 0.5;
+      if (outL && outR) continue;
+      best = Math.max(best, on / cols);
+    }
+    return dw > 0 ? best : 0;
+  }
+
   var meanOf = function (arr) { var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i]; return arr.length ? s / arr.length : 0; };
   var median = function (sorted) { return sorted.length ? sorted[sorted.length >> 1] : 0; };
 
@@ -543,6 +564,16 @@
       if (ch !== " ") seenVisible = true;
       // 2.ª opción si está cerca (1↔7 difieren en un solo segmento): sirve para corregir por contexto
       var alt = ranked.slice(1, 3).filter(function (r) { return r.d - best.d < 1.2 && /\d/.test(r.ch); }).map(function (r) { return r.ch; });
+      // 1 ↔ 7: se decide midiendo cuánto del ANCHO cubre la barra de arriba (ver topBarCoverage).
+      if (ch === "1" || ch === "7") {
+        var cov = topBarCoverage(img, roi, ci, digits, tanSlant, light, lo, contrast);
+        if (ch === "7" && cov < 0.3) { ch = "1"; conf = Math.min(conf, 0.6); }
+        else if (ch === "1" && cov > 0.6) { ch = "7"; conf = Math.min(conf, 0.6); }
+        else if (cov >= 0.3 && cov <= 0.6) conf = Math.min(conf, 0.3); // barra a medias: dudoso
+        var other = ch === "1" ? "7" : "1";
+        if (alt.indexOf(other) < 0) alt.unshift(other); // siempre queda la otra opción para corregir por contexto
+        alt = alt.filter(function (a) { return a !== ch; });
+      }
       out.push({ ch: ch, conf: conf, bits: bits, alt: alt });
     }
 
@@ -2742,10 +2773,25 @@
   var DEVICE_RANGE = { tempIn: [-10, 50], tempOut: [-50, 70], humidity: [10, 99] };
   function inDeviceRange(key, v) { var r = DEVICE_RANGE[key]; return !r || (v >= r[0] && v <= r[1]); }
   function maxJump(key, s) { return key === "humidity" ? s.maxHumidityJump : s.maxTempJump; }
+  /**
+   * Cambio máximo creíble ENTRE DOS LECTURAS según el tiempo que pasó: la temperatura de una caja
+   * cambia de forma gradual. Temperatura: 1,5 °C + 0,5 °C por minuto (tope: «salto máximo» de Ajustes);
+   * humedad: 5 % + 2 % por minuto (tope: su «salto máximo»). Sin tiempo conocido: el tope.
+   */
+  function jumpLimit(key, s, dtMs) {
+    var cap = maxJump(key, s);
+    if (dtMs == null || !isFinite(dtMs) || dtMs < 0) return cap;
+    var min = dtMs / 60000;
+    return Math.min(cap, key === "humidity" ? 5 + 2 * min : 1.5 + 0.5 * min);
+  }
+  /** Deriva máxima creíble respecto a una referencia de hace horas (temperatura): tope + 4 °C por hora. */
+  function driftLimit(s, dtMs) { return s.maxTempJump + 4 * Math.max(0, dtMs) / 3600000; }
 
   /**
    * Valida el texto OCR de un campo.
-   * ctx: { settings, roi: { digits, decimals }, previous (último valor confiable reciente), previousRaw (valor de la lectura anterior) }
+   * ctx: { settings, roi: { digits, decimals }, previous (último valor confiable reciente), previousRaw (valor de la lectura anterior),
+   *        dtMs (tiempo desde «previous»), recentRaws (valores leídos en las 2 lecturas anteriores, para confirmar un cambio),
+   *        refValue/refAgeMs (referencia de las últimas horas o el valor que la persona escribió al calibrar) }
    */
   function validateField(key, ocr, ctx) {
     var s = ctx.settings;
@@ -2773,11 +2819,12 @@
     var value = Number(text), confidence = ocr.confidence, flags = [], note;
     var decimals = ctx.roi ? ctx.roi.decimals || 0 : 0;
     var prev = ctx.previous;
+    var lim = jumpLimit(key, s, ctx.dtMs);
 
     // Punto decimal ausente ("315" en un display que siempre muestra "31.5").
     if (decimals > 0 && text.indexOf(".") < 0) {
       var candidate = Math.round((value / Math.pow(10, decimals)) * Math.pow(10, decimals)) / Math.pow(10, decimals);
-      if (prev != null && Math.abs(candidate - prev) <= maxJump(key, s) && plausible(key, candidate, s)) {
+      if (prev != null && Math.abs(candidate - prev) <= lim && plausible(key, candidate, s)) {
         flags.push("OCR_CORRECTION");
         note = "Corrección OCR: \"" + text + "\" interpretado como " + candidate + " (el display muestra " + decimals + " decimal y el valor es coherente con la lectura anterior " + prev + ").";
         value = candidate;
@@ -2795,7 +2842,7 @@
         .filter(function (t) { return /^-?\d+(\.\d+)?$/.test(t) && (decimals === 0 || t.indexOf(".") >= 0); })
         .map(function (t) { return { t: t, v: Number(t) }; })
         .filter(function (x) { return inRange(x.v); });
-      if (prev != null) c = c.filter(function (x) { return Math.abs(x.v - prev) <= maxJump(key, s); }).sort(function (a, b) { return Math.abs(a.v - prev) - Math.abs(b.v - prev); });
+      if (prev != null) c = c.filter(function (x) { return Math.abs(x.v - prev) <= lim; }).sort(function (a, b) { return Math.abs(a.v - prev) - Math.abs(b.v - prev); });
       else if (c.length !== 1) return null; // sin lectura anterior solo si hay UNA alternativa posible
       return c[0] || null;
     };
@@ -2812,16 +2859,28 @@
       applyFix(fx, "fuera de escala");
     }
 
-    if (prev != null && Math.abs(value - prev) > maxJump(key, s)) {
-      var confirmedBy = ctx.previousRaw;
-      var confirmed = confirmedBy != null && Math.abs(value - confirmedBy) <= maxJump(key, s) / 2;
-      var fx2 = confirmed ? null : altFix();
+    if (prev != null && Math.abs(value - prev) > lim) {
+      // Un cambio brusco solo se acepta si se SOSTIENE: las 2 lecturas anteriores ya mostraban ese valor
+      // (3 seguidas). Una sola lectura repetida no basta (un dígito mal leído suele repetirse una vez).
+      var raws = ctx.recentRaws || (ctx.previousRaw != null ? [ctx.previousRaw] : []);
+      var confirmed = raws.length >= 2 && raws.every(function (r) { return r != null && Math.abs(value - r) <= Math.max(1, lim / 2); });
+      var fx2 = altFix();
+      if (fx2 && Math.abs(fx2.v - prev) < Math.abs(value - prev)) confirmed = false; // una opción de dígito concuerda mejor: se prefiere
+      else fx2 = confirmed ? null : fx2;
       if (fx2) { applyFix(fx2, "salto de " + signed(value - prev) + " respecto a " + prev); confirmed = true; }
       if (!confirmed) {
         flags.push("IMPROBABLE_JUMP");
-        note = (note ? note + " " : "") + "Salto de " + signed(value - prev) + " respecto a la lectura anterior (" + prev + "); se confirma con la siguiente lectura.";
+        note = (note ? note + " " : "") + "Salto de " + signed(value - prev) + " respecto a la lectura anterior (" + prev + "); los cambios son graduales: se acepta solo si se repite en 3 lecturas seguidas.";
         confidence = Math.min(confidence, s.minConfidence - 1);
       }
+    }
+
+    // Coherencia con las últimas horas (o con el valor que la persona escribió al calibrar): de 21 °C
+    // no se pasa a 70 °C. Si se aleja más de lo creíble para el tiempo transcurrido, queda dudosa.
+    if (key !== "humidity" && ctx.refValue != null && Math.abs(value - ctx.refValue) > driftLimit(s, ctx.refAgeMs || 0)) {
+      flags.push("INCOHERENT");
+      note = (note ? note + " " : "") + "No es coherente con " + ctx.refValue + " °C de " + (ctx.refFromUser ? "la lectura que escribiste al calibrar" : "las últimas horas") + " (cambio de " + signed(value - ctx.refValue) + "). Revisa la calibración si se repite.";
+      confidence = Math.min(confidence, s.minConfidence - 1);
     }
 
     return Object.assign({}, base, {
@@ -2877,11 +2936,24 @@
         if (!roi || !roi.enabled) return;
         var prevRel = key === "time" ? null : lastReliable(key, recentWindow);
         var prevRawField = prevAny && prevAny.fields && prevAny.fields[key];
+        var previous = prevRel ? prevRel[key] : null, prevTs = prevRel ? prevRel.ts : null;
+        // Valor que la persona escribió al calibrar («Compara»): punto de partida mientras sea reciente.
+        var anc = cal.anchor && cal.anchor.values && cal.anchor.values[key] != null && now - cal.anchor.ts < 6 * 3600000 ? cal.anchor : null;
+        if (key !== "time" && anc && (prevTs == null || anc.ts > prevTs) && now - anc.ts < recentWindow) { previous = anc.values[key]; prevTs = anc.ts; }
+        var recentRaws = history.slice(-2).map(function (h) { var f = h.fields && h.fields[key]; return f && f.value != null ? f.value : null; });
+        var ref = key === "time" || key === "humidity" ? null : lastReliable(key, 6 * 3600000);
+        var refValue = ref ? ref[key] : null, refTs = ref ? ref.ts : null, refFromUser = false;
+        if (key !== "time" && anc && (refTs == null || anc.ts > refTs)) { refValue = anc.values[key]; refTs = anc.ts; refFromUser = true; }
         fields[key] = validateField(key, (cap.fields || {})[key], {
           settings: S,
           roi: roi,
-          previous: prevRel ? prevRel[key] : null,
+          previous: previous,
+          dtMs: prevTs != null ? now - prevTs : null,
           previousRaw: prevRawField && prevRawField.value != null ? prevRawField.value : null,
+          recentRaws: recentRaws.length === 2 ? recentRaws : null,
+          refValue: refValue,
+          refAgeMs: refTs != null ? now - refTs : 0,
+          refFromUser: refFromUser,
         });
       });
     }
@@ -5012,7 +5084,7 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
   // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
-  const APP_VERSION = "v19", APP_DATE = "17-nov-2026";
+  const APP_VERSION = "v20", APP_DATE = "18-nov-2026";
   const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
   const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   /**
@@ -5111,18 +5183,36 @@
         try { const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); tmp.getTracks().forEach((t) => t.stop()); all = await navigator.mediaDevices.enumerateDevices(); }
         catch (e) { toast(cameraErrorMessage(e), "warn"); }
       }
-      App.cam.devices = all.filter((d) => d.kind === "videoinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || "Camera " + (i + 1) }));
+      App.cam.devices = all.filter((d) => d.kind === "videoinput").map((d, i) => ({ deviceId: d.deviceId, label: d.label || "Camera " + (i + 1), named: !!d.label }));
     } catch (e) { App.cam.devices = []; }
     renderCameraForm();
+    renderCamPicker();
   }
+
+  // Integradas del portátil: se prefieren las EXTERNAS (USB) cuando nadie eligió todavía.
+  const isBuiltIn = (label) => /integrat|integrad|built.?in|facetime|internal|interna|front|frontal|hd webcam$|truevision|hp (hd|wide)|lenovo easycamera|chicony|realtek|bison|azurewave|sunplus/i.test(label || "");
+  /**
+   * Resuelve qué cámara abrir: 1) el id guardado si existe en ESTE navegador; 2) si no, la que tiene el
+   * mismo nombre (el id de una cámara cambia entre la extensión, la app instalada y la página); 3) sin
+   * elección de la persona, una cámara externa antes que la integrada del portátil.
+   */
+  function resolveDevice(id, label) {
+    const list = App.cam.devices.filter((d) => d.deviceId);
+    if (!list.length) return id || null;
+    if (id && list.some((d) => d.deviceId === id)) return id;
+    if (label) { const byName = list.find((d) => d.label === label) || list.find((d) => d.label.replace(/\s*\(.*\)$/, "") === label.replace(/\s*\(.*\)$/, "")); if (byName) return byName.deviceId; }
+    if (!App.settings.cameraChosen) { const ext = list.find((d) => d.named && !isBuiltIn(d.label)); if (ext) return ext.deviceId; }
+    return id || null;
+  }
+  const labelOf = (id) => { const d = App.cam.devices.find((x) => x.deviceId === id); return d && d.named ? d.label : null; };
 
   function wantedDeviceIds() {
     const S = App.settings;
     if (S.cameraMode === "dual") {
-      const ids = [sensorById("A"), sensorById("B")].filter((s) => s && s.enabled).map((s) => s.cameraDeviceId || null);
+      const ids = [sensorById("A"), sensorById("B")].filter((s) => s && s.enabled).map((s) => resolveDevice(s.cameraDeviceId, s.cameraLabel));
       return ids.filter((v, i) => ids.indexOf(v) === i);
     }
-    return [S.cameraDeviceId || null];
+    return [resolveDevice(S.cameraDeviceId, S.cameraLabel)];
   }
 
   function stopCameras() {
@@ -5137,6 +5227,7 @@
     stopCameras();
     App.cam.lastTry = Date.now();
     setCamStatus("starting");
+    if (!App.cam.devices.some((d) => d.named)) { try { await refreshDevices(true); } catch (e) { /* sin nombres: se usa el id guardado */ } }
     const [w, h] = App.settings.resolution.split("x").map(Number);
     try {
       for (const id of wantedDeviceIds()) {
@@ -5151,7 +5242,7 @@
           if (!id || (e.name !== "OverconstrainedError" && e.name !== "NotFoundError")) throw e;
           // La cámara elegida ya no está: seguir con la predeterminada en vez de quedar sin lecturas.
           stream = await navigator.mediaDevices.getUserMedia(constraints(null));
-          toast("La cámara configurada no está disponible; se usa la cámara predeterminada.", "warn");
+          toast("La cámara configurada no está disponible; se usa la predeterminada. Elige la cámara en Inicio → Cámara.", "warn");
         }
         const video = document.createElement("video");
         video.muted = true;
@@ -5163,10 +5254,12 @@
         track.addEventListener("ended", () => setCamStatus("error", "La cámara se desconectó o dejó de enviar imagen (" + track.label + ")."));
         const st = (track.getSettings && track.getSettings()) || {};
         App.cam.streams.push({ requested: id, deviceId: real, label: (track.label || "Cámara") + (st.width ? " · " + st.width + "×" + st.height : ""), stream, video, canvas: document.createElement("canvas") });
-        if (!id && App.settings.cameraMode === "single") await saveSettings({ cameraDeviceId: real || null });
+        if (App.settings.cameraMode === "single" && real && real !== App.settings.cameraDeviceId) await saveSettings({ cameraDeviceId: real, cameraLabel: track.label || App.settings.cameraLabel || null });
+        else if (App.settings.cameraMode === "single" && track.label && !App.settings.cameraLabel) await saveSettings({ cameraLabel: track.label });
       }
       setCamStatus("active");
       await refreshDevices();
+      renderCamPicker();
     } catch (e) {
       stopCameras();
       setCamStatus("error", cameraErrorMessage(e));
@@ -5868,6 +5961,7 @@
     const keepH = host.offsetHeight, keepY = window.scrollY;
     if (keepH) host.style.minHeight = keepH + "px";
     host.innerHTML =
+      '<div id="camPicker" hidden></div>' +
       '<div class="home"><div class="boxes">' + cards.join("") + "</div>" + todoHtml + "</div>" +
       chartsHtml + profHtml +
       '<div class="trio">' +
@@ -5876,6 +5970,7 @@
         lampsHtml + camHtml +
       "</div>" + lastRecordsHtml(recent3h.length >= 12 ? recent3h : today.length >= 12 ? today : await App.store.readingsRange(now - 2 * DAY, now));
 
+    renderCamPicker();
     requestAnimationFrame(() => { host.style.minHeight = ""; if (Math.abs(window.scrollY - keepY) > 2) window.scrollTo(0, keepY); });
     $$("[data-caja]", host).forEach((b) => b.addEventListener("click", () => { App.caja.sensor = b.dataset.caja; App.caja.period = "today"; showView("caja"); }));
     $$("[data-act]", host).forEach((btn) => btn.addEventListener("click", () => {
@@ -5994,6 +6089,35 @@
 
   // ─────────────────────────── CÁMARA (vista) ───────────────────────────
 
+  /** La persona elige la cámara (Ajustes o la barra de Inicio): se guarda id + nombre y se abre ya. */
+  async function chooseCamera(id) {
+    await saveSettings({ cameraDeviceId: id || null, cameraLabel: labelOf(id), cameraChosen: true });
+    if (App.settings.frameSource === "camera") await startCameras();
+    renderCameraForm();
+    renderCamPicker();
+  }
+  /** Barra «Cámara de monitoreo» en Inicio: muestra cuál se usa y deja cambiarla en un clic. */
+  function renderCamPicker() {
+    const host = document.getElementById("camPicker");
+    if (!host) return;
+    const S = App.settings;
+    if (S.frameSource !== "camera" || S.cameraMode !== "single") { host.hidden = true; return; }
+    const devs = App.cam.devices.filter((d) => d.deviceId);
+    const cur = (App.cam.streams[0] && App.cam.streams[0].deviceId) || resolveDevice(S.cameraDeviceId, S.cameraLabel);
+    const many = devs.length > 1, unsure = many && !S.cameraChosen;
+    host.hidden = false;
+    host.className = "banner cam-picker" + (unsure ? " warn" : "");
+    host.innerHTML = "<b>📷 Cámara de monitoreo:</b> " +
+      (devs.length
+        ? '<select id="camPick" aria-label="Cámara de monitoreo">' + devs.map((d) => '<option value="' + esc(d.deviceId) + '"' + (d.deviceId === cur ? " selected" : "") + ">" + esc(d.label) + (isBuiltIn(d.label) ? " (integrada)" : "") + "</option>").join("") + "</select>"
+        : '<span class="muted-text">aún no hay permiso para ver las cámaras</span>') +
+      ' <button class="btn small" type="button" id="camPickFind">Buscar cámaras</button>' +
+      (unsure ? ' <span>Hay ' + devs.length + " cámaras: elige la que ve los sensores.</span>" : "");
+    const sel = host.querySelector("#camPick");
+    if (sel) sel.addEventListener("change", (e) => chooseCamera(e.target.value));
+    host.querySelector("#camPickFind").addEventListener("click", async () => { await refreshDevices(true); toast(App.cam.devices.filter((d) => d.deviceId).length + " cámara(s) encontradas."); });
+  }
+
   function renderCameraForm() {
     const S = App.settings;
     $$('input[name="frameSource"]').forEach((r) => (r.checked = r.value === S.frameSource));
@@ -6029,9 +6153,9 @@
       }),
     );
     $("#camMode").addEventListener("change", async (e) => { await saveSettings({ cameraMode: e.target.value }); renderCameraForm(); if (App.cam.status === "active") startCameras(); });
-    $("#camSelect").addEventListener("change", async (e) => { await saveSettings({ cameraDeviceId: e.target.value || null }); if (App.cam.status === "active") startCameras(); });
+    $("#camSelect").addEventListener("change", (e) => chooseCamera(e.target.value));
     ["A", "B"].forEach((id) =>
-      $("#camSel" + id).addEventListener("change", async (e) => { sensorById(id).cameraDeviceId = e.target.value || null; await saveSensors(); if (App.cam.status === "active") startCameras(); }),
+      $("#camSel" + id).addEventListener("change", async (e) => { const s = sensorById(id); s.cameraDeviceId = e.target.value || null; s.cameraLabel = labelOf(s.cameraDeviceId); await saveSensors(); await saveSettings({ cameraChosen: true }); if (App.cam.status === "active") startCameras(); }),
     );
     $("#camRes").addEventListener("change", async (e) => { await saveSettings({ resolution: e.target.value }); if (App.cam.status === "active") startCameras(); });
     $("#camFps").addEventListener("change", async (e) => {
@@ -6286,7 +6410,7 @@
         const cell = $("#calApp_" + k);
         if (cell.textContent !== shown) cell.textContent = shown;
         cell.classList.toggle("doubt", !ok);
-        inp.placeholder = ok ? showRead(read, dec) : "escribe";
+        inp.placeholder = ok ? "¿" + showRead(read, dec) + "?" : "escribe";
         const typed = inp.value.trim(), off = typed !== "" && !sameRead(k, typed, read);
         inp.classList.toggle("bad", off);
         if (off) bad.push(L.FIELD_LABELS[k] + ": la app lee «" + (read ? showRead(read, dec) : "nada") + "» y tú ves «" + typed + "»");
@@ -6598,6 +6722,10 @@
         msg.className = "msg warn";
         if (!typedAny.length) return;
       }
+      // Valores escritos por la persona = referencia para las próximas lecturas (cambios graduales desde ahí).
+      const typedVals = {};
+      CMP_KEYS.forEach(([k, sel]) => { if (k === "time") return; const v = parseNum($(sel).value.trim()); if (v != null) typedVals[k] = k === "humidity" ? Math.round(v) : Math.round(v * 10) / 10; });
+      if (Object.keys(typedVals).length) d.anchor = { ts: Date.now(), values: typedVals };
       if (!typedAny.length) { persistDraft(); return setCalStep(3); }
       msg.textContent = "Ajustando (unos segundos)…"; msg.className = "msg";
       $("#exFit").disabled = true;
