@@ -76,6 +76,7 @@
     LECTURA_INCIERTA: { cls: "warn", box: "warn", icon: "warn", label: "Lectura dudosa" },
     CAMARA_DESCONECTADA: { cls: "crit", box: "crit", icon: "crit", label: "Cámara desconectada" },
     SENSOR_NO_DETECTADO: { cls: "crit", box: "crit", icon: "crit", label: "Sensor no visible" },
+    SIN_LUZ: { cls: "warn", box: "warn", icon: "warn", label: "Sin luz" },
   };
   function statusChip(code) {
     const ui = STATUS_UI[code] || STATUS_UI.SIN_DATOS;
@@ -112,7 +113,7 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
   // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
-  const APP_VERSION = "v20", APP_DATE = "18-nov-2026";
+  const APP_VERSION = "v21", APP_DATE = "23-nov-2026";
   const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
   const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   /**
@@ -128,6 +129,7 @@
     const es = data.events.filter((e) => e.ts >= from).sort((a, b) => a.ts - b.ts);
     const base = "bioteva-monitor_" + stamp() + "_" + String(reason).replace(/[^\w-]/g, "");
     const files = [{ name: base + ".json", text: JSON.stringify(data) }];
+    try { const y = L.dayKey(now - DAY); files.push({ name: "bioteva-monitor_" + y + "_reporte.html", text: await buildDayReportHtml(y) }); } catch (e) { /* sin reporte */ }
     try { files.push({ name: base + ".xlsx", base64: u8ToB64(new Uint8Array(await buildWorkbook(rs, es, App.sensors, App.settings, from, now))) }); } catch (e) { /* sin Excel: queda el JSON */ }
     const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 60000);
     try {
@@ -142,6 +144,78 @@
       throw new Error(e.name === "AbortError" ? "tardó demasiado" : /fetch/i.test(e.message) ? "el servicio local (puerto 4479) no responde" : e.message);
     } finally { clearTimeout(to); }
   }
+  /**
+   * Reporte de un día en HTML autónomo: hallazgos en lenguaje claro, tarjetas con cifras, gráficas
+   * (OUT/IN y humedad), barra de estados (confiable / sin luz / no visible / dudosa), tabla por hora y
+   * glosario. Se guarda solo cada día en Documentos › BioTeva-Monitor-Respaldos y se puede descargar.
+   */
+  async function buildDayReportHtml(dayKeyStr) {
+    const S = App.settings, b = L.dayBounds(dayKeyStr);
+    const rows = (await App.store.readingsRange(b.from, b.to)).filter((r) => r.source !== "simulation").sort((a, c) => a.ts - c.ts);
+    const ana = L.analyzePeriod(rows, App.sensors, S, b.from, b.to);
+    const f1 = (v, d) => (v == null || !isFinite(v) ? "–" : fmt(v, d == null ? 1 : d));
+    const COLORS = { ok: "#2E7D32", SIN_LUZ: "#6B5B4C", SENSOR_NO_DETECTADO: "#C62828", LECTURA_INCIERTA: "#B26A00", other: "#D2C5A8" };
+    const stateBar = (a) => {
+      const parts = [["Confiable", a.reliable, COLORS.ok], ["Sin luz", a.byStatus.SIN_LUZ || 0, COLORS.SIN_LUZ], ["Sensor no visible", a.byStatus.SENSOR_NO_DETECTADO || 0, COLORS.SENSOR_NO_DETECTADO], ["Dudosa", a.byStatus.LECTURA_INCIERTA || 0, COLORS.LECTURA_INCIERTA]];
+      const other = Math.max(0, a.total - parts.reduce((t, p) => t + p[1], 0));
+      if (other) parts.push(["Otra", other, COLORS.other]);
+      let x = 0;
+      const W = 600, segs = parts.filter((p) => p[1]).map((p) => { const w = (W * p[1]) / Math.max(1, a.total); const r = '<rect x="' + x.toFixed(1) + '" y="0" width="' + w.toFixed(1) + '" height="22" fill="' + p[2] + '"><title>' + esc(p[0]) + ": " + p[1] + "</title></rect>"; x += w; return r; }).join("");
+      return '<svg viewBox="0 0 600 22" width="100%" height="22" role="img" aria-label="Estado de las lecturas">' + segs + "</svg>" +
+        '<div class="legend">' + parts.filter((p) => p[1]).map((p) => '<span><i style="background:' + p[2] + '"></i>' + esc(p[0]) + " " + Math.round((100 * p[1]) / Math.max(1, a.total)) + " % (" + p[1] + ")</span>").join("") + "</div>";
+    };
+    const hourBars = (a) => { // % confiable por hora: muestra de un vistazo las horas en que no se pudo leer
+      const W = 600, H = 90, bw = W / 24;
+      return '<svg viewBox="0 0 600 112" width="100%" role="img" aria-label="Porcentaje de lecturas confiables por hora">' +
+        a.hours.map((x) => { const p = x.n ? x.reliable / x.n : 0, h = Math.max(x.n ? 2 : 0, p * H); return '<rect x="' + (x.h * bw + 2).toFixed(1) + '" y="' + (H - h).toFixed(1) + '" width="' + (bw - 4).toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + (p >= 0.8 ? COLORS.ok : p >= 0.4 ? COLORS.LECTURA_INCIERTA : COLORS.SENSOR_NO_DETECTADO) + '"><title>' + pad2(x.h) + ":00 · " + Math.round(p * 100) + " % confiables de " + x.n + "</title></rect>"; }).join("") +
+        [0, 6, 12, 18].map((h) => '<text x="' + (h * bw + 2) + '" y="106" font-size="11" fill="#6B5B4C">' + pad2(h) + ":00</text>").join("") +
+        '<line x1="0" x2="600" y1="' + H + '" y2="' + H + '" stroke="#D2C5A8"/></svg>';
+    };
+    const card = (lbl, v, sub) => '<div class="card"><span>' + esc(lbl) + "</span><b>" + v + "</b>" + (sub ? "<small>" + esc(sub) + "</small>" : "") + "</div>";
+    const ser = (sid, k) => L.series(rows, sid, k, b.from, b.to, 300).map((p) => ({ t: p.t, v: p.v }));
+    const gGap = Math.max(3 * L.maxIntervalSec(S) * 1000, 30 * 60000);
+    const sections = ana.map((a) => {
+      const s = sensorById(a.sensorId), ck = a.controlKey, oth = ck === "tempOut" ? "tempIn" : "tempOut";
+      return '<section><h2>' + esc(a.sensorName) + "</h2>" +
+        '<div class="cards">' +
+          card("Lecturas", String(a.total), "confiables: " + a.reliable + " (" + (a.reliablePct == null ? "–" : Math.round(a.reliablePct)) + " %)") +
+          card("OUT · sonda", f1(a.stats.tempOut.mean) + " °C", "mín " + f1(a.stats.tempOut.min) + " · máx " + f1(a.stats.tempOut.max)) +
+          card("IN · aparato", f1(a.stats.tempIn.mean) + " °C", "mín " + f1(a.stats.tempIn.min) + " · máx " + f1(a.stats.tempIn.max)) +
+          card("Humedad", f1(a.stats.humidity.mean, 0) + " %", "mín " + f1(a.stats.humidity.min, 0) + " · máx " + f1(a.stats.humidity.max, 0)) +
+          card("Tus límites", s.tempMin == null && s.tempMax == null ? "sin configurar" : f1(s.tempMin) + "–" + f1(s.tempMax) + " °C", a.outOfRange ? a.outOfRange + " lecturas fuera" : "") +
+        "</div>" +
+        "<h3>Lo que muestran los datos</h3><ul class=\"findings\">" + a.findings.map((f) => '<li class="' + f.level + '">' + esc(f.text) + "</li>").join("") + "</ul>" +
+        "<h3>¿Se pudo leer? Estado de cada lectura</h3>" + stateBar(a) +
+        "<h3>Temperatura del día · OUT (línea) e IN (punteada)</h3>" +
+        boxChartSvg({ id: "r" + a.sensorId, pts: ser(a.sensorId, ck), cmp: ser(a.sensorId, oth), from: b.from, to: b.to, mn: s.tempMin, mx: s.tempMax, unit: "°C", dec: 1, gapMs: gGap, minSpan: 2, h: 240, noNow: true, label: "Temperatura de " + a.sensorName }) +
+        "<h3>Humedad del día</h3>" +
+        boxChartSvg({ id: "rh" + a.sensorId, pts: ser(a.sensorId, "humidity"), cmp: null, from: b.from, to: b.to, mn: s.humMin, mx: s.humMax, unit: "%", dec: 0, gapMs: gGap, minSpan: 10, h: 150, noNow: true, label: "Humedad de " + a.sensorName }) +
+        "<h3>% de lecturas confiables por hora</h3>" + hourBars(a) +
+        "<h3>Tabla por hora</h3><table><thead><tr><th>Hora</th><th>Lecturas</th><th>% confiables</th><th>Sin luz</th><th>No visible</th><th>OUT prom</th><th>IN prom</th><th>HR prom</th></tr></thead><tbody>" +
+          a.hours.map((x) => "<tr><td>" + pad2(x.h) + ":00</td><td>" + x.n + "</td><td>" + (x.n ? Math.round((100 * x.reliable) / x.n) + " %" : "–") + "</td><td>" + x.dark + "</td><td>" + x.notSeen + "</td><td>" + f1(x.tempOut) + "</td><td>" + f1(x.tempIn) + "</td><td>" + f1(x.humidity, 0) + "</td></tr>").join("") +
+        "</tbody></table></section>";
+    }).join("");
+    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BioTeva · Reporte ' + esc(dayKeyStr) + "</title><style>" +
+      ":root{--bg:#FAF6EE;--surface:#fff;--line:#E2D8C3;--text:#4A3728;--muted:#6B5B4C;--brand:#1A4D2E;--ok:#2E7D32;--ok-bg:#E6F2E3;--warn:#B26A00;--crit:#C62828}" +
+      "body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,Segoe UI,sans-serif}main{max-width:980px;margin:0 auto;padding:24px 16px}" +
+      "h1{color:var(--brand);margin:0 0 4px}h2{color:var(--brand);border-bottom:2px solid var(--line);padding-bottom:4px;margin-top:36px}h3{margin:22px 0 8px;font-size:15px}" +
+      ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column}.card span{font-size:12px;color:var(--muted)}.card b{font-size:22px}.card small{color:var(--muted)}" +
+      ".findings{padding-left:0;list-style:none}.findings li{margin:6px 0;padding:8px 12px;border-radius:8px;background:var(--surface);border-left:5px solid var(--line)}.findings .ok{border-color:var(--ok)}.findings .warn{border-color:var(--warn)}.findings .crit{border-color:var(--crit)}" +
+      ".legend{display:flex;flex-wrap:wrap;gap:12px;font-size:13px;margin:6px 0}.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}" +
+      "table{border-collapse:collapse;width:100%;font-size:13px;background:var(--surface)}th,td{border:1px solid var(--line);padding:4px 8px;text-align:right}th:first-child,td:first-child{text-align:left}" +
+      "svg{max-width:100%;height:auto}.gloss dt{font-weight:700;margin-top:8px}.gloss dd{margin:0 0 0 14px;color:var(--muted)}footer{margin-top:40px;color:var(--muted);font-size:12px}" +
+      "</style></head><body><main><h1>Reporte ambiental · " + esc(dayKeyStr) + "</h1><p>BioTeva Monitor " + APP_VERSION + " · generado " + esc(L.fmtDateTime(Date.now())) + " · " + rows.length + " lecturas reales (sin simulación).</p>" +
+      (sections || "<p>No hay lecturas este día.</p>") +
+      '<h2>Cómo leer este reporte</h2><dl class="gloss">' +
+        "<dt>OUT · sonda</dt><dd>Temperatura en la punta del cable (dentro de la caja). Es la temperatura de control.</dd>" +
+        "<dt>IN · aparato</dt><dd>Temperatura del aire donde está la pantalla del termohigrómetro (el cuarto).</dd>" +
+        "<dt>Lectura confiable</dt><dd>Dígitos leídos con confianza y coherentes con las lecturas anteriores. Solo estas cuentan en promedios y gráficas.</dd>" +
+        "<dt>Sin luz</dt><dd>La pantalla estaba demasiado oscura para leerla. Se resuelve con una luz cerca de los sensores en las lecturas de noche.</dd>" +
+        "<dt>Sensor no visible</dt><dd>La imagen no se parece a la de la calibración (sensor o cámara movidos, algo tapando, oscuridad).</dd>" +
+        "<dt>Promedio, mínimo, máximo, desviación</dt><dd>Calculados solo con lecturas confiables. La desviación indica cuánto varió la temperatura alrededor del promedio.</dd>" +
+      "</dl><footer>La app no inventa límites para los grillos ni afirma causas: los límites los define la persona y los hallazgos describen lo medido.</footer></main></body></html>";
+  }
+
   /** Una copia al día (y al actualizar la versión). Si el servicio local no está, lo reintenta luego. */
   async function autoBackupCheck(reason) {
     try {
@@ -189,7 +263,7 @@
     renderHeader();
     const msg = $("#camMsg");
     if (msg) {
-      msg.textContent = error || (status === "active" ? "Cámara activa." : status === "starting" ? "Solicitando la cámara…" : "");
+      msg.textContent = error || (status === "active" ? "Cámara activa." : status === "starting" ? "Solicitando la cámara…" : status === "standby" ? "Cámara en reposo para ahorrar energía: se enciende sola unos segundos antes de cada lectura." : "");
       msg.className = "msg " + (status === "error" ? "crit" : status === "active" ? "good" : "");
     }
   }
@@ -410,11 +484,14 @@
     const prev = App.prevThumbs[sensor.id];
     const ref = Seg.b64ToThumb(cal.reference);
     if (updateThumb) App.prevThumbs[sensor.id] = thumb;
+    let bsum = 0;
+    for (let i = 0; i < raw.d.length; i++) bsum += raw.d[i];
     return {
       capture: {
         captureStatus: "ok",
         fields,
         contrast,
+        brightness: Math.round((bsum / Math.max(1, raw.d.length)) * 10) / 10,
         imageChangeScore: prev ? Seg.thumbDiff(prev, thumb, false) : undefined,
         referenceDiffScore: ref ? Seg.thumbDiff(ref, thumb, true) : undefined,
       },
@@ -550,6 +627,10 @@
     const now = Date.now(), S = App.settings, cache = {}, results = [];
     try {
       const active = App.sensors.filter((s) => s.enabled);
+      if (S.frameSource === "camera" && App.cam.status !== "active") {
+        await startCameras();
+        await new Promise((r) => setTimeout(r, 2500)); // la cámara ajusta exposición y foco
+      }
       // luz de lectura (enchufe TP-Link): se enciende, se espera a que la cámara ajuste la exposición, y se apaga al final
       if (S.frameSource === "camera" && window.MonThermalUI && window.MonThermalUI.readingLight) {
         const lead = await window.MonThermalUI.readingLight(true);
@@ -618,7 +699,13 @@
     } finally {
       if (App.lightOn) { App.lightOn = false; window.MonThermalUI.readingLight(false); }
       App.busy = false;
-      if (App.running) App.nextAt = now + S.intervalSec * 1000;
+      if (App.running) App.nextAt = now + L.intervalAt(S, now) * 1000;
+      // Ahorro: con lecturas cada 5 min o más, la cámara se apaga hasta la próxima (no en Cámara/Calibrar).
+      if (App.running && S.frameSource === "camera" && S.energySaver && L.intervalAt(S, now) >= 300 && ["camara", "calibracion"].indexOf(App.view) < 0 && App.cam.status === "active") {
+        stopCameras();
+        setCamStatus("standby");
+      }
+      heartbeat(results, now);
       renderHeader();
       if (["dashboard", "historico", "alertas", "graficas"].indexOf(App.view) >= 0) renderView();
       else updateAlertCount();
@@ -626,7 +713,58 @@
     return results;
   }
 
+  /** Sonido de alerta (Web Audio): 3 pitidos. Chrome lo permite tras haber tocado la app una vez. */
+  function alarmSound(times) {
+    if (!App.settings.sound) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      App.audio = App.audio || new Ctx();
+      const ctx = App.audio, t0 = ctx.currentTime + 0.05;
+      for (let i = 0; i < (times || 3); i++) {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.value = 880; o.connect(g); g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.0001, t0 + i * 0.5); g.gain.exponentialRampToValueAtTime(0.4, t0 + i * 0.5 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.5 + 0.35);
+        o.start(t0 + i * 0.5); o.stop(t0 + i * 0.5 + 0.4);
+      }
+    } catch (e) { /* sin sonido */ }
+  }
+  /** Aviso fuerte en la app: sonido + notificación del sistema + mensaje. */
+  function loudAlert(title, body, key) {
+    toast(title + ": " + body, "crit");
+    alarmSound(3);
+    if ("Notification" in window && Notification.permission === "granted") {
+      try { new Notification("BioTeva · " + title, { body, icon: "icons/icon-128.png", tag: key || title, requireInteraction: true }); } catch (e) { /* opcional */ }
+    }
+  }
+  /**
+   * Señal de vida tras cada lectura: al servicio local (vigila, reabre la app y manda alertas por correo /
+   * Telegram) y, en la extensión, al service worker (reabre la pestaña si se cierra o se queda quieta).
+   */
+  function heartbeat(results, now) {
+    const S = App.settings;
+    App.lastReliable = App.lastReliable || {};
+    results.forEach((r) => { const s = sensorById(r.reading.sensorId), ck = L.controlKey(s); if (r.reading[ck] != null) App.lastReliable[s.id] = now; });
+    const sensors = App.sensors.filter((s) => s.enabled).map((s) => {
+      const rd = App.latest[s.id] || {};
+      if (!App.lastReliable[s.id]) App.lastReliable[s.id] = App.startedAt || now;
+      return { id: s.id, name: s.name, status: rd.status || null, statusLabel: L.STATUS_LABELS[rd.status] || rd.status || "", tempIn: rd.tempIn, tempOut: rd.tempOut, humidity: rd.humidity, tempMin: s.tempMin, tempMax: s.tempMax, humMin: s.humMin, humMax: s.humMax, lastReliableTs: App.lastReliable[s.id] };
+    });
+    const events = results.flatMap((r) => r.events).filter((e) => e.severity !== "INFO").map((e) => ({ type: e.type, label: L.EVENT_LABELS[e.type] || e.type, description: e.description, sensorId: e.sensorId }));
+    const body = { running: !!App.running, intervalSec: L.intervalAt(S, now), nextAt: App.nextAt || null, appUrl: location.href.split("#")[0], sensors, events };
+    if (window.MonThermalUI && window.MonThermalUI.api) window.MonThermalUI.api("POST", "/api/heartbeat", body).catch(() => {});
+    if (App.isExtension && typeof chrome !== "undefined" && chrome.storage) { try { chrome.storage.local.set({ running: !!App.running, lastCycleAt: now, nextAt: App.nextAt || 0, intervalSec: L.intervalAt(S, now) }); } catch (e) { /* opcional */ } }
+    // En la app: aviso fuerte si un sensor lleva horas sin lectura confiable (luz, cámara o calibración).
+    App.loudAt = App.loudAt || {};
+    sensors.forEach((s) => {
+      if (now - s.lastReliableTs > 3 * HOUR && (!App.loudAt[s.id] || now - App.loudAt[s.id] > 3 * HOUR)) {
+        App.loudAt[s.id] = now;
+        loudAlert("Sin lecturas confiables", s.name + " lleva " + Math.round((now - s.lastReliableTs) / HOUR) + " h sin una lectura confiable (" + (s.statusLabel || "sin estado") + "). Revisa la luz, la cámara o recalibra ese sensor.", "noread-" + s.id);
+      }
+    });
+  }
+
   function notifyEvents(events) {
+    if (events.some((e) => e.severity === "CRITICAL")) alarmSound(3);
     events.filter((e) => e.severity !== "INFO").forEach((e) => {
       toast(e.severity + " · " + (L.EVENT_LABELS[e.type] || e.type) + ": " + e.description, e.severity === "CRITICAL" ? "crit" : "warn");
       if (App.settings.notifications && "Notification" in window && Notification.permission === "granted") {
@@ -642,7 +780,10 @@
     if (on) {
       if (App.settings.frameSource === "camera" && App.cam.status !== "active") await startCameras();
       App.nextAt = Date.now();
-      try { if ("wakeLock" in navigator) App.wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { App.wakeLock = null; }
+      App.startedAt = App.startedAt || Date.now();
+      // La pantalla PUEDE apagarse: no se pide «wake lock» de pantalla (ahorro de energía). Lo que no debe
+      // pasar es que el computador se suspenda: ver «Configurar energía» en el paquete de instalación.
+      try { alarmSound(0); } catch (e) { /* desbloquea el audio con el clic del usuario */ }
     } else {
       App.nextAt = 0;
       if (App.wakeLock) { App.wakeLock.release().catch(() => {}); App.wakeLock = null; }
@@ -667,6 +808,8 @@
     // Si la cámara se desconectó o falló, reintentar sola cada 30 s mientras el monitoreo siga en curso.
     if (App.running && App.settings.frameSource === "camera" && (App.cam.status === "error" || App.cam.status === "off") &&
         Date.now() - (App.cam.lastTry || 0) > 30000) startCameras();
+    // En reposo: se enciende si la persona abre Cámara o Calibrar.
+    if (App.cam.status === "standby" && ["camara", "calibracion"].indexOf(App.view) >= 0) startCameras();
     if (App.running && !App.busy && Date.now() >= App.nextAt) runCycle("timer");
     renderHeader();
   }
@@ -980,9 +1123,9 @@
         ? boxes.map((b) => { const on = b.state && b.state.heater === "ON"; return '<div class="lamp-row"><b>' + esc(b.name) + '</b><span class="chip soft ' + (on ? "warn" : "") + '">' + ico("lamp", 16) + (on ? "Encendida" : "Apagada") + '</span><span class="muted-text">' + esc(MODE_TXT[b.mode] || b.mode || "") + "</span></div>"; }).join("")
         : '<p class="muted-text">' + (window.MonThermalUI && window.MonThermalUI.online === false ? "El control de lámparas no está conectado en este computador. La lectura de los sensores sigue funcionando." : "No hay lámparas configuradas.") + "</p>") +
       "</div></div>";
-    const srcTxt = { camera: { active: "Cámara activa", starting: "Encendiendo la cámara…", error: "La cámara no responde", off: "Cámara apagada" }[App.cam.status] || "Cámara apagada", image: "Imagen de prueba", simulation: "Simulación (datos de prueba)" }[S.frameSource];
+    const srcTxt = { camera: { active: "Cámara activa", starting: "Encendiendo la cámara…", error: "La cámara no responde", off: "Cámara apagada", standby: "Cámara en reposo (ahorro de energía)" }[App.cam.status] || "Cámara apagada", image: "Imagen de prueba", simulation: "Simulación (datos de prueba)" }[S.frameSource];
     const camHtml = '<div class="panel"><header><h2>Cámara</h2></header><div class="panel-body"><div class="cam-mini"><canvas id="dashPreview" width="1280" height="720" aria-label="Vista previa de la cámara"></canvas>' +
-      '<div class="col" style="gap:6px"><b>' + esc(srcTxt) + '</b><span class="muted-text">Lee cada ' + esc(intervalLabel(S.intervalSec)) + ' · próxima: <b id="dashNext">' + esc(App.running ? nextIn() || "ahora" : "detenido") + "</b></span>" +
+      '<div class="col" style="gap:6px"><b>' + esc(srcTxt) + '</b><span class="muted-text">Lee cada ' + esc(intervalLabel(L.intervalAt(S, now))) + (S.nightIntervalSec && S.nightIntervalSec !== S.intervalSec ? " (" + (L.inWindowHM(S.nightFrom, S.nightTo, now) ? "horario de noche" : "horario de día") + ")" : "") + ' · próxima: <b id="dashNext">' + esc(App.running ? nextIn() || "ahora" : "detenido") + "</b></span>" +
       '<div class="row-actions"><button class="btn small" type="button" id="dashNow">Leer ahora</button><a class="btn ghost small" href="#calibracion" data-go="calibracion">Calibrar</a></div></div></div></div></div>';
 
     // redibujo sin saltos: se conserva la altura y el desplazamiento mientras se reemplaza el contenido
@@ -1030,7 +1173,7 @@
 
   function fmtMinutes(m) { return m < 60 ? m + " min" : Math.floor(m / 60) + " h " + (m % 60) + " min"; }
 
-  function intervalLabel(sec) { return sec < 60 ? sec + " segundos" : sec / 60 + (sec === 60 ? " minuto" : " minutos"); }
+  function intervalLabel(sec) { return sec < 60 ? sec + " segundos" : sec >= 3600 ? sec / 3600 + (sec === 3600 ? " hora" : " horas") : sec / 60 + (sec === 60 ? " minuto" : " minutos"); }
 
   function eventItem(e) {
     const s = sensorById(e.sensorId);
@@ -2223,6 +2366,106 @@
     bindGo(host);
   }
 
+  // ─────────────────────────── ALERTAS (servicio local) ───────────────────────────
+
+  /** Configuración de alertas: vive en el servicio local (manda correos/Telegram aunque la app esté cerrada). */
+  async function renderAlertsPanel() {
+    const host = $("#alertsPanel .panel-body");
+    if (!host) return;
+    const api = window.MonThermalUI && window.MonThermalUI.api;
+    let a = null, err = "";
+    try { a = api ? await api("GET", "/api/alerts") : null; } catch (e) { err = e.message; }
+    if (!a || !a.alerts) {
+      host.innerHTML = '<div class="banner warn">El servicio local (puerto 4479) no responde' + (err ? " (" + esc(err) + ")" : "") + ". Las alertas por correo y Telegram, el aviso con sonido en el computador y el vigilante que reabre la app necesitan ese servicio: se instala con el paquete y requiere Node.js. La app igual avisa con sonido mientras esté abierta.</div>";
+      return;
+    }
+    const al = a.alerts, em = al.email, tg = al.telegram, w = al.watchdog;
+    const chk = (id, on, txt) => '<label class="f inline"><input type="checkbox" id="' + id + '"' + (on ? " checked" : "") + "> <span>" + txt + "</span></label>";
+    host.innerHTML =
+      '<p class="hint">Se avisa cuando: la temperatura sale de <b>tus límites</b> (Ajustes → Sensores y límites), un sensor pasa varias horas sin lecturas confiables, la cámara falla o el monitoreo se detiene. Cada aviso se repite como máximo una vez por hora.</p>' +
+      '<h3 class="sub-h">En este computador</h3>' +
+      chk("alDesk", al.desktop, "Sonido y aviso de Windows") +
+      chk("alWd", w.enabled, "Vigilante: si la app deja de leer (margen " + esc(String(w.graceMin)) + " min) avisa") + chk("alRel", w.relaunch, "…y la vuelve a abrir sola") +
+      '<div class="grid-form"><label class="f"><span>Avisar si un sensor lleva sin lectura confiable (horas)</span><input id="alHours" type="number" min="1" max="48" value="' + esc(String(al.noReliableHours)) + '"></label></div>' +
+      '<h3 class="sub-h">Correo</h3>' + chk("alEm", em.enabled, "Enviar alertas por correo") +
+      '<div class="grid-form">' +
+        '<label class="f"><span>Enviar a</span><input id="alTo" type="email" multiple value="' + esc(em.to) + '"></label>' +
+        '<label class="f"><span>Cuenta Gmail que envía</span><input id="alUser" type="email" placeholder="cuenta@gmail.com" value="' + esc(em.user) + '"></label>' +
+        '<label class="f"><span>Contraseña de aplicación de esa cuenta</span><input id="alPass" type="password" autocomplete="new-password" placeholder="' + (em.hasPass ? "•••• guardada (deja vacío para conservarla)" : "16 letras, la crea Google") + '"></label>' +
+      "</div>" +
+      '<p class="hint">Gmail no deja usar la contraseña normal: en la cuenta que envía, activa la verificación en 2 pasos y crea una <b>contraseña de aplicación</b> (myaccount.google.com → Seguridad → Contraseñas de aplicaciones). Se guarda solo en este computador.</p>' +
+      '<h3 class="sub-h">Telegram</h3>' + chk("alTg", tg.enabled, "Enviar alertas por Telegram al bot <b>" + esc(tg.bot || "Bioteva_ops_bot") + "</b>") +
+      '<div class="grid-form">' +
+        '<label class="f"><span>Token del bot (de @BotFather)</span><input id="alTok" type="password" autocomplete="off" placeholder="' + (tg.hasToken ? "•••• guardado (deja vacío para conservarlo)" : "123456789:AA…") + '"></label>' +
+        '<label class="f"><span>Chat (número)</span><input id="alChat" inputmode="numeric" value="' + esc(String(tg.chatId || "")) + '" placeholder="se busca solo"></label>' +
+      "</div>" +
+      '<p class="hint">1) En Telegram abre @BotFather → /mybots → ' + esc(tg.bot || "Bioteva_ops_bot") + " → API Token y pégalo aquí. 2) Escríbele cualquier mensaje al bot (desde tu cuenta o agrega el bot a un grupo). 3) Toca «Buscar chat».</p>" +
+      '<div class="row-actions"><button class="btn primary" type="button" id="alSave">Guardar</button><button class="btn" type="button" id="alFind">Buscar chat</button><button class="btn" type="button" id="alTestTg">Probar Telegram</button><button class="btn" type="button" id="alTest">Probar correo y aviso</button></div>' +
+      '<span class="msg" id="alMsg" role="status"></span>' +
+      (a.log && a.log.length ? '<h3 class="sub-h">Últimas alertas</h3><ul class="plain">' + a.log.slice().reverse().slice(0, 8).map((x) => "<li>" + esc(fmtWhen(x.ts)) + " · <b>" + esc(x.title) + "</b>" + (x.email ? " · correo " + esc(x.email) : "") + (x.telegram ? " · Telegram " + esc(x.telegram) : "") + "</li>").join("") + "</ul>" : "") +
+      (a.incident ? '<div class="banner crit">El vigilante detectó que el monitoreo se detuvo desde ' + esc(fmtWhen(a.incident.since)) + ".</div>" : "");
+    const msg = (t, cls) => { const m = $("#alMsg"); m.textContent = t; m.className = "msg " + (cls || ""); };
+    const save = async () => {
+      const body = { desktop: $("#alDesk").checked, noReliableHours: Number($("#alHours").value), watchdog: { enabled: $("#alWd").checked, relaunch: $("#alRel").checked },
+        email: { enabled: $("#alEm").checked, to: $("#alTo").value.trim(), user: $("#alUser").value.trim(), from: $("#alUser").value.trim() }, telegram: { enabled: $("#alTg").checked, chatId: $("#alChat").value.trim() } };
+      if ($("#alPass").value.trim()) body.email.pass = $("#alPass").value.trim();
+      if ($("#alTok").value.trim()) body.telegram.token = $("#alTok").value.trim();
+      await api("PUT", "/api/alerts", body);
+    };
+    $("#alSave").addEventListener("click", async () => { try { await save(); msg("Guardado.", "good"); setTimeout(renderAlertsPanel, 800); } catch (e) { msg(e.message, "crit"); } });
+    $("#alFind").addEventListener("click", async () => {
+      try { await save(); const r = await api("POST", "/api/telegram/find-chat", {}); if (!r.ok) return msg(r.error, "crit");
+        if (!r.chats.length) return msg("Aún no hay mensajes: escríbele al bot desde Telegram y vuelve a tocar «Buscar chat».", "warn");
+        if (r.chats.length === 1) { $("#alChat").value = r.chats[0].id; await save(); return msg("Chat encontrado: " + r.chats[0].name + ". Toca «Probar Telegram».", "good"); }
+        msg("Varios chats: " + r.chats.map((c) => c.name + " = " + c.id).join(" · ") + ". Escribe el número que quieres y Guarda.", "warn");
+      } catch (e) { msg(e.message, "crit"); }
+    });
+    $("#alTestTg").addEventListener("click", async () => { try { await save(); const r = await api("POST", "/api/alerts/test", { channel: "telegram" }); msg(r.ok ? "Mensaje de prueba enviado a Telegram." : r.error, r.ok ? "good" : "crit"); } catch (e) { msg(e.message, "crit"); } });
+    $("#alTest").addEventListener("click", async () => { try { await save(); const r = await api("POST", "/api/alerts/test", {}); msg(r.ok ? "Correo de prueba enviado a " + $("#alTo").value + " (y aviso en el computador)." : r.error, r.ok ? "good" : "crit"); } catch (e) { msg(e.message, "crit"); } });
+  }
+
+  // ─────────────────────────── ENERGÍA (estimado) ───────────────────────────
+
+  const ENERGY_DEFAULTS = { pcW: 12, screenW: 18, screenH: 1, camW: 1.5, camSec: 10, lampW: 3, lampSec: 15, lampAlwaysNight: false, tariff: "" };
+  /** Consumo estimado del monitoreo con el horario actual. Valores típicos editables: mídelos con un medidor de enchufe. */
+  async function renderEnergyPanel() {
+    const host = $("#energyPanel .panel-body");
+    if (!host) return;
+    const E = Object.assign({}, ENERGY_DEFAULTS, (await App.store.getKV("energy")) || {}), S = App.settings;
+    const night = (() => { let n = 0; for (let m = 0; m < 1440; m += 10) if (L.inWindowHM(S.nightFrom, S.nightTo, new Date(2026, 0, 1, 0, m).getTime())) n += 10; return S.nightIntervalSec ? n / 60 : 0; })();
+    const dayH = 24 - night, nInt = S.nightIntervalSec || S.intervalSec;
+    const readsDay = (dayH * 3600) / S.intervalSec, readsNight = (night * 3600) / nInt, reads = readsDay + readsNight;
+    const camAlways = !(S.energySaver && Math.min(S.intervalSec, nInt) >= 300);
+    const camH = camAlways ? 24 : (reads * E.camSec) / 3600;
+    const lampH = E.lampAlwaysNight ? night : (readsNight * E.lampSec) / 3600;
+    const items = [
+      ["Computador encendido con la pantalla apagada", E.pcW, 24],
+      ["Pantalla encendida (cuando la usas)", E.screenW, E.screenH],
+      ["Cámara USB", E.camW, camH],
+      ["Lámpara para leer de noche", E.lampW, lampH],
+      ["Termohigrómetros HTC-2 (pila AAA)", 0.0005, 24],
+    ];
+    const wh = items.map((x) => x[1] * x[2]), tot = wh.reduce((t, v) => t + v, 0);
+    const num = (id, v, step, lbl) => '<label class="f"><span>' + lbl + '</span><input type="number" step="' + step + '" min="0" data-e="' + id + '" value="' + esc(String(v)) + '"></label>';
+    host.innerHTML =
+      '<p class="hint">Con el horario actual: <b>' + Math.round(reads) + " lecturas al día</b> (" + Math.round(readsDay) + " de día cada " + esc(intervalLabel(S.intervalSec)) + ", " + Math.round(readsNight) + " de noche cada " + esc(intervalLabel(nInt)) + "). " + (camAlways ? "La cámara queda encendida todo el día (activa «Ahorro de energía» con lecturas de 5 min o más)." : "La cámara se enciende solo ~" + E.camSec + " s por lectura.") + "</p>" +
+      '<div class="table-scroll"><table><thead><tr><th>Equipo</th><th>Potencia (W)</th><th>Horas al día</th><th>Wh por día</th></tr></thead><tbody>' +
+        items.map((x, i) => "<tr><td>" + esc(x[0]) + "</td><td>" + fmt(x[1], x[1] < 0.01 ? 4 : 1) + "</td><td>" + fmt(x[2], 2) + "</td><td>" + fmt(wh[i], 1) + "</td></tr>").join("") +
+        "<tr><th>Total</th><th></th><th></th><th>" + fmt(tot, 0) + " Wh = " + fmt(tot / 1000, 2) + " kWh/día · " + fmt((tot * 30) / 1000, 1) + " kWh/mes" + (Number(E.tariff) > 0 ? " · ≈ $" + Math.round((tot * 30 * Number(E.tariff)) / 1000).toLocaleString("es-CO") + "/mes" : "") + "</th></tr>" +
+      "</tbody></table></div>" +
+      '<p class="hint">Lo que más pesa es el <b>computador encendido</b> todo el día. Para gastar menos sin dejar de vigilar: deja que la pantalla se apague (la app sigue leyendo), usa un portátil (≈ 8–15 W) en vez de un computador de escritorio (≈ 40–80 W), y enciende la lámpara solo durante la lectura (enchufe TP-Link con «luz de lectura»). Son <b>estimaciones típicas</b>: cámbialas por lo que mida un medidor de enchufe.</p>' +
+      '<div class="grid-form">' + num("pcW", E.pcW, 1, "Computador, pantalla apagada (W)") + num("screenW", E.screenW, 1, "Pantalla (W)") + num("screenH", E.screenH, 0.5, "Horas de pantalla al día") +
+        num("camW", E.camW, 0.1, "Cámara USB (W)") + num("camSec", E.camSec, 1, "Segundos de cámara por lectura") + num("lampW", E.lampW, 0.5, "Lámpara (W)") + num("lampSec", E.lampSec, 1, "Segundos de lámpara por lectura") +
+        num("tariff", E.tariff, 1, "Tarifa ($ por kWh, opcional)") + "</div>" +
+      '<label class="f inline"><input type="checkbox" data-e="lampAlwaysNight"' + (E.lampAlwaysNight ? " checked" : "") + "> <span>La lámpara queda encendida toda la noche (sin control por enchufe)</span></label>";
+    $$("[data-e]", host).forEach((el) => el.addEventListener("change", async () => {
+      const nE = Object.assign({}, E);
+      $$("[data-e]", host).forEach((i) => { nE[i.dataset.e] = i.type === "checkbox" ? i.checked : i.dataset.e === "tariff" ? i.value : Math.max(0, Number(i.value) || 0); });
+      await App.store.setKV("energy", nE);
+      renderEnergyPanel();
+    }));
+  }
+
   // ─────────────────────────── DATOS Y CONEXIONES ───────────────────────────
 
   async function renderDatos() {
@@ -2240,8 +2483,12 @@
           (lastPc ? "Última: " + esc(fmtWhen(lastPc.ts)) + " · " + esc(String(lastPc.readings)) + " lecturas" + (lastPc.dir ? " · " + esc(lastPc.dir) : "") : "Aún no hay copias en el computador.") +
           (App.backupError ? ' · <span class="crit-text">Último intento falló: ' + esc(App.backupError) + ".</span>" : "") + "</span></div>" +
           '<button class="btn primary" type="button" id="dPcBk">Guardar copia ahora</button></div>' +
+        '<div class="conn-row"><div><b>Reporte del día (HTML)</b><span class="muted-text">Gráficas, tabla por hora, cifras explicadas y hallazgos. Se guarda solo cada día en la carpeta de respaldos; aquí lo descargas cuando quieras.</span></div>' +
+          '<select id="dRepDay" aria-label="Día del reporte"><option value="0">Hoy</option><option value="1">Ayer</option><option value="2">Hace 2 días</option></select><button class="btn" type="button" id="dRep">Descargar reporte</button></div>' +
         (vh.length ? '<div class="conn-row"><div><b>Historial de versiones</b><span class="muted-text">' + vh.map((x) => esc(x.v) + " el " + esc(fmtWhen(x.ts)) + " (" + esc(String(x.readings)) + " lecturas guardadas)").join(" · ") + "</span></div></div>" : "") +
       "</div></div>" +
+      '<div class="panel" id="alertsPanel"><header><h2>Alertas: correo, Telegram y aviso si se detiene</h2></header><div class="panel-body col"><p class="muted-text">Consultando el servicio local…</p></div></div>' +
+      '<div class="panel" id="energyPanel"><header><h2>Consumo de energía (estimado)</h2></header><div class="panel-body col"></div></div>' +
       '<div class="panel"><header><h2>Llevar tus datos a otros sistemas</h2></header><div class="panel-body">' +
         '<div class="conn-row"><div><b>Excel</b><span class="muted-text">Lecturas, alertas y resumen por día, listo para abrir en Excel.</span></div>' +
           '<select id="dXlsxDays" aria-label="Periodo del Excel"><option value="1">Hoy</option><option value="7">7 días</option><option value="30" selected>30 días</option></select>' +
@@ -2272,6 +2519,12 @@
       try { await navigator.clipboard.writeText(JSON.stringify(await summary())); toast("Resumen copiado. Pégalo en el panel → Monitoreo."); }
       catch (e) { toast("No se pudo copiar; usa «Descargar».", "warn"); }
     });
+    $("#dRep").addEventListener("click", async () => {
+      const k = L.dayKey(Date.now() - Number($("#dRepDay").value) * DAY);
+      download(new Blob([await buildDayReportHtml(k)], { type: "text/html" }), "bioteva-reporte_" + k + ".html");
+    });
+    renderAlertsPanel();
+    renderEnergyPanel();
     $("#dPcBk").addEventListener("click", async (ev) => {
       ev.target.disabled = true;
       try { const i = await saveBackupToPc("manual"); toast("Copia guardada en " + (i.dir || "el computador") + " (" + i.files.length + " archivos)."); }
@@ -2398,8 +2651,14 @@
     host.innerHTML =
       '<form class="panel" id="setForm"><header><h2>Lectura y alertas</h2><div class="spacer"></div><button class="btn primary" type="submit">Guardar</button></header><div class="panel-body col">' +
         "<h3 class=\"sub-h\">Frecuencia</h3><div class=\"grid-form\">" +
-          '<label class="f"><span>Leer cada</span><select name="intervalSec">' + L.INTERVAL_OPTIONS.map((v) => '<option value="' + v + '"' + (v === S.intervalSec ? " selected" : "") + ">" + esc(intervalLabel(v)) + "</option>").join("") + "</select></label>" +
+          '<label class="f"><span>De día, leer cada</span><select name="intervalSec">' + L.INTERVAL_OPTIONS.map((v) => '<option value="' + v + '"' + (v === S.intervalSec ? " selected" : "") + ">" + esc(intervalLabel(v)) + "</option>").join("") + "</select></label>" +
+          '<label class="f"><span>De noche, leer cada</span><select name="nightIntervalSec"><option value="0"' + (!S.nightIntervalSec ? " selected" : "") + ">Igual que de día</option>" + L.INTERVAL_OPTIONS.map((v) => '<option value="' + v + '"' + (v === S.nightIntervalSec ? " selected" : "") + ">" + esc(intervalLabel(v)) + "</option>").join("") + "</select></label>" +
+          '<label class="f"><span>Noche desde</span><input name="nightFrom" type="time" value="' + esc(S.nightFrom) + '"></label>' +
+          '<label class="f"><span>Noche hasta</span><input name="nightTo" type="time" value="' + esc(S.nightTo) + '"></label>' +
         "</div>" +
+        '<label class="f inline"><input type="checkbox" name="energySaver"' + (S.energySaver ? " checked" : "") + '> <span><b>Ahorro de energía:</b> con lecturas cada 5 min o más, la cámara se apaga entre lecturas y se enciende sola unos segundos antes de cada una.</span></label>' +
+        '<label class="f inline"><input type="checkbox" name="sound"' + (S.sound ? " checked" : "") + '> <span><b>Sonido de alerta</b> en la app (alertas críticas y sensores sin lectura confiable).</span></label>' +
+        '<p class="hint">La pantalla del computador puede apagarse: la app sigue leyendo. Lo que <b>no</b> debe pasar es que el computador se suspenda o se apague (ver «Configurar energía» en el paquete de instalación). Si la app se detiene, el servicio local lo detecta, la reabre y avisa (Datos y conexiones → Alertas).</p>' +
         '<h3 class="sub-h">Confianza del OCR</h3><div class="grid-form">' +
           n("Confianza mínima (%)", "minConfidence", 1, "Por debajo: LOW CONFIDENCE, no se usa como dato") +
           n("Confianza alta desde (%)", "highConfidence", 1) +
@@ -2450,8 +2709,10 @@
     $("#setForm").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const fd = new FormData(ev.target), patch = {};
-      fd.forEach((v, k) => { patch[k] = k === "saveSnapshots" ? v : Number(v); });
+      fd.forEach((v, k) => { patch[k] = ["saveSnapshots", "nightFrom", "nightTo"].indexOf(k) >= 0 ? v : Number(v); });
       patch.notifications = fd.get("notifications") === "on";
+      patch.energySaver = fd.get("energySaver") === "on";
+      patch.sound = fd.get("sound") === "on";
       const err = $(".form-err", ev.target);
       if (patch.notifications && "Notification" in window && Notification.permission !== "granted") {
         const p = await Notification.requestPermission();
@@ -2460,7 +2721,7 @@
       try {
         await saveSettings(patch);
         err.hidden = true;
-        if (App.running) App.nextAt = Math.min(App.nextAt, Date.now() + App.settings.intervalSec * 1000);
+        if (App.running) App.nextAt = Math.min(App.nextAt, Date.now() + L.intervalAt(App.settings, Date.now()) * 1000);
         toast("Configuración guardada.");
         renderSettings();
       } catch (e) { err.hidden = false; err.textContent = e.message; }
@@ -2527,7 +2788,7 @@
   // ─────────────────────────── arranque ───────────────────────────
 
   async function loadConfig() {
-    const saved = await App.store.getKV("settings");
+    let saved = await App.store.getKV("settings");
     if (saved && !saved.cfgV) {
       if (saved.minContrast === 12) saved.minContrast = 4; // umbral anterior, demasiado alto para LCD reales
       saved.cfgV = 2;
@@ -2535,8 +2796,14 @@
     App.migrateOut = !!(saved && (saved.cfgV || 0) < 3);
     // v4: la cámara queda fija → el seguimiento automático pasa a estar apagado (se puede activar)
     App.migrateTrack = !!(saved && (saved.cfgV || 0) < 4);
-    if (saved) saved.cfgV = 4;
+    App.migrateSchedule = !saved || (saved.cfgV || 0) < 5;
+    if (App.migrateSchedule) {
+      saved = saved || {};
+      Object.assign(saved, { intervalSec: 3600, nightIntervalSec: 600, nightFrom: "18:00", nightTo: "06:00", energySaver: true, sound: true, snapshotRetentionDays: Math.min(saved.snapshotRetentionDays || 7, 7) });
+    }
+    if (saved) saved.cfgV = 5;
     App.settings = L.validateSettings(saved || {}).value;
+    if (App.migrateSchedule) { await App.store.setKV("settings", App.settings); setTimeout(() => toast("Nuevo horario: de día una lectura cada hora y de noche (18:00–06:00) cada 10 minutos, con la cámara apagada entre lecturas. Se cambia en Ajustes → Lectura y alertas."), 2500); }
     const sensors = await App.store.getKV("sensors");
     if (Array.isArray(sensors) && sensors.length) {
       App.sensors = ["A", "B"].map((id) => {
@@ -2621,7 +2888,7 @@
     window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); App.installPrompt = e; $("#installBtn").hidden = false; });
     window.addEventListener("appinstalled", () => { $("#installBtn").hidden = true; toast("BioTeva Monitor quedó instalado en este computador."); });
     document.addEventListener("visibilitychange", async () => {
-      if (!document.hidden && App.running && !App.wakeLock && "wakeLock" in navigator) { try { App.wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { /* opcional */ } }
+      /* la pantalla puede apagarse: sin wake lock de pantalla */
     });
     let rz;
     window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (App.view === "graficas") renderCharts(); }, 250); });

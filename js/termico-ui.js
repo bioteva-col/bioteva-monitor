@@ -380,6 +380,7 @@
   window.MonThermalUI = {
     attach(app, helpers) { App = app; H = helpers; },
     poll, onCycle, render, dashboardHtml, bindModeButtons, readingLight,
+    api: (method, path, body) => gw(method, path, body),
     getStatus: () => (S.online ? S.status : null),
     get online() { return S.online; },
   };

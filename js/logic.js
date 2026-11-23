@@ -27,6 +27,7 @@
     LECTURA_INCIERTA: "Lectura incierta",
     CAMARA_DESCONECTADA: "Cámara desconectada",
     SENSOR_NO_DETECTADO: "Sensor no detectado",
+    SIN_LUZ: "Sin luz (muy oscuro)",
   };
   var EVENT_LABELS = {
     TEMPERATURE_INCREASE: "Aumento de temperatura",
@@ -48,10 +49,11 @@
     SENSOR_NOT_DETECTED: "Sensor no detectado",
     POSSIBLE_DISCONNECTION: "Posible desconexión / display apagado",
     DATA_GAP: "Periodo sin datos",
+    TOO_DARK: "Muy oscuro para leer",
   };
   var CHANGE_TYPES = ["TEMPERATURE_INCREASE", "TEMPERATURE_DECREASE", "HUMIDITY_INCREASE", "HUMIDITY_DECREASE"];
 
-  var INTERVAL_OPTIONS = [30, 60, 120, 300, 600, 900];
+  var INTERVAL_OPTIONS = [30, 60, 120, 300, 600, 900, 1800, 3600];
 
   /** Parámetros de DETECCIÓN (no son límites biológicos). */
   var DEFAULT_SETTINGS = {
@@ -80,6 +82,13 @@
     maxHumidityJump: 20,
     eventCooldownMin: 30,
     notifications: false,
+    // Horario: de día lee cada intervalSec; en la franja de noche, cada nightIntervalSec (0 = igual que de día).
+    nightIntervalSec: 0, // la app instala el horario pedido (noche cada 10 min) al cargar la configuración
+    nightFrom: "18:00",
+    nightTo: "06:00",
+    energySaver: true, // apaga la cámara entre lecturas cuando el intervalo es de 5 min o más
+    sound: true,       // sonido en la app ante alertas
+    darkLevel: 30,     // brillo medio de la pantalla del sensor (0–255) por debajo del cual «no hay luz»
   };
 
   var NUMERIC_RULES = {
@@ -101,6 +110,7 @@
     maxTempJump: [0.1, 100],
     maxHumidityJump: [0.5, 100],
     eventCooldownMin: [1, 1440, true],
+    darkLevel: [0, 200],
   };
 
   /** Valida y completa la configuración. { ok, value, errors[] } */
@@ -120,8 +130,26 @@
     if (s.minConfidence >= s.highConfidence) errors.push("La confianza mínima debe ser menor que la confianza alta");
     if (s.plausibleTempMin >= s.plausibleTempMax) errors.push("Rango de plausibilidad inválido");
     s.notifications = !!s.notifications;
+    s.energySaver = !!s.energySaver;
+    s.sound = !!s.sound;
+    s.nightIntervalSec = Number(s.nightIntervalSec) || 0;
+    if (s.nightIntervalSec && INTERVAL_OPTIONS.indexOf(s.nightIntervalSec) < 0) errors.push("nightIntervalSec: valor no permitido");
+    if (!/^\d{1,2}:\d{2}$/.test(s.nightFrom || "") || !/^\d{1,2}:\d{2}$/.test(s.nightTo || "")) errors.push("La franja de noche va como HH:MM");
     return { ok: errors.length === 0, value: s, errors: errors };
   }
+
+  /** ¿La hora de ts cae en la franja HH:MM–HH:MM? (admite franjas que pasan la medianoche) */
+  function inWindowHM(from, to, ts) {
+    var m = function (x) { var r = /^(\d{1,2}):(\d{2})$/.exec(x || ""); return r ? Number(r[1]) * 60 + Number(r[2]) : null; };
+    var a = m(from), b = m(to);
+    if (a == null || b == null || a === b) return false;
+    var d = new Date(ts), n = d.getHours() * 60 + d.getMinutes();
+    return a < b ? n >= a && n < b : n >= a || n < b;
+  }
+  /** Intervalo de lectura (s) que rige a esa hora: el de noche dentro de la franja, si no el de día. */
+  function intervalAt(S, ts) { return S.nightIntervalSec && inWindowHM(S.nightFrom, S.nightTo, ts) ? S.nightIntervalSec : S.intervalSec; }
+  /** El mayor de los dos intervalos: para no confundir el cambio día/noche con un hueco sin datos. */
+  function maxIntervalSec(S) { return Math.max(S.intervalSec || 60, S.nightIntervalSec || 0); }
 
   function HTC2_FIELDS() {
     return {
@@ -377,7 +405,7 @@
    */
   function processCycle(ctx) {
     var S = ctx.settings, sensor = ctx.sensor, cap = ctx.capture || {}, now = ctx.now, history = ctx.history || [];
-    var cal = sensor.calibration, name = sensor.name, intervalMs = S.intervalSec * 1000;
+    var cal = sensor.calibration, name = sensor.name, intervalMs = maxIntervalSec(S) * 1000;
     var prevAny = history.length ? history[history.length - 1] : null;
     var recentWindow = Math.max(15 * 60000, 5 * intervalMs);
 
@@ -392,6 +420,7 @@
 
     var condition = "ok";
     if (cap.captureStatus === "camera_error") condition = "camera_error";
+    else if (cap.brightness != null && cap.brightness < (S.darkLevel == null ? 30 : S.darkLevel)) condition = "dark"; // de noche sin luz la cámara no ve los dígitos
     else if (cap.referenceDiffScore != null && cap.referenceDiffScore >= S.notDetectedRefDiff) condition = "not_detected";
     else if (cap.contrast != null && cap.contrast < S.minContrast) condition = "blank";
 
@@ -498,7 +527,7 @@
     }
 
     // ---- periodo sin datos ----
-    if (prevAny && now - prevAny.ts > (S.noDataCycles + 0.5) * intervalMs) {
+    if (prevAny && now - prevAny.ts > (S.noDataCycles + 0.5) * Math.max(intervalAt(S, prevAny.ts), intervalAt(S, now)) * 1000) {
       emit("DATA_GAP", "WARNING", null, round1((now - prevAny.ts) / 60000), null, null,
         "Sin lecturas de " + name + " entre " + fmtTime(prevAny.ts) + " y " + fmtTime(now) + " (" + fmtDuration(now - prevAny.ts) + "). Posible interrupción del monitoreo (equipo apagado, suspendido o navegador cerrado). Se requiere verificación.");
     }
@@ -512,6 +541,10 @@
     if (condition === "not_detected" && prevCond !== "not_detected") {
       emit("SENSOR_NOT_DETECTED", "WARNING", null, cap.referenceDiffScore, null, null,
         "La imagen de " + name + " difiere de la calibración (" + num(cap.referenceDiffScore) + "/100). Posible sensor movido, cámara movida, sensor fuera del encuadre o pantalla cubierta. Se requiere verificación física.");
+    }
+    if (condition === "dark" && prevCond !== "dark") {
+      emit("TOO_DARK", "WARNING", null, cap.brightness, null, null,
+        "Está muy oscuro para leer la pantalla de " + name + " (brillo " + num(cap.brightness) + "/255). Enciende una luz cerca de los sensores (p. ej. una lámpara USB o la «luz de lectura» en un enchufe TP-Link) para que la cámara pueda leer de noche.");
     }
     if (condition === "blank" && prevCond !== "blank") {
       emit("POSSIBLE_DISCONNECTION", "WARNING", null, cap.contrast, null, null,
@@ -631,6 +664,7 @@
     // ---- estado ----
     var status = "NORMAL";
     if (condition === "camera_error") status = "CAMARA_DESCONECTADA";
+    else if (condition === "dark") status = "SIN_LUZ";
     else if (condition === "not_detected" || condition === "blank") status = "SENSOR_NO_DETECTADO";
     else if (!isReliable(level)) status = "LECTURA_INCIERTA";
     else if (confirmedOut) status = "FUERA_DE_RANGO";
@@ -648,7 +682,7 @@
     if (!sensor.enabled) return { code: "SIN_DATOS", note: "Sensor desactivado" };
     if (!last) return { code: "SIN_DATOS", note: "Aún no hay lecturas" };
     var age = now - last.ts;
-    if (age > (S.noDataCycles + 0.5) * S.intervalSec * 1000) return { code: "SIN_DATOS", note: "Sin lecturas desde " + fmtTime(last.ts) + " (" + fmtDuration(age) + ")" };
+    if (age > (S.noDataCycles + 0.5) * maxIntervalSec(S) * 1000) return { code: "SIN_DATOS", note: "Sin lecturas desde " + fmtTime(last.ts) + " (" + fmtDuration(age) + ")" };
     return { code: last.status, note: "" };
   }
 
@@ -719,6 +753,65 @@
       });
     });
     return out;
+  }
+
+  /**
+   * Análisis de un periodo por sensor, para reportes y Excel: confiabilidad, estado de cada lectura,
+   * comportamiento por hora (lecturas, % confiables, % sin luz o sin ver el sensor, promedios), huecos
+   * sin datos, estadísticas y HALLAZGOS en lenguaje claro. Solo describe lo medido: no afirma causas.
+   */
+  function analyzePeriod(readings, sensors, S, from, to) {
+    // hueco: más de (ciclos sin datos + ½) intervalos del horario vigente (de noche, 10 min; de día, 1 h)
+    var gapAt = function (a, b) { return Math.max((S.noDataCycles + 0.5) * Math.max(intervalAt(S, a), intervalAt(S, b)) * 1000, 20 * 60000); };
+    var hh = function (ts) { var d = new Date(ts); return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); };
+    var dur = function (ms) { var m = Math.round(ms / 60000); return m >= 60 ? Math.floor(m / 60) + " h " + (m % 60 ? (m % 60) + " min" : "") : m + " min"; };
+    return sensors.filter(function (s) { return s.enabled; }).map(function (s) {
+      var ck = controlKey(s), rs = readings.filter(function (r) { return r.sensorId === s.id && r.ts >= from && r.ts <= to; }).sort(function (a, b) { return a.ts - b.ts; });
+      var byStatus = {};
+      rs.forEach(function (r) { byStatus[r.status] = (byStatus[r.status] || 0) + 1; });
+      var reliable = rs.filter(function (r) { return r[ck] != null; }).length;
+      var hours = [];
+      for (var h = 0; h < 24; h++) hours.push({ h: h, n: 0, reliable: 0, dark: 0, notSeen: 0, uncertain: 0, sum: { tempIn: [0, 0], tempOut: [0, 0], humidity: [0, 0] } });
+      rs.forEach(function (r) {
+        var x = hours[new Date(r.ts).getHours()];
+        x.n++;
+        if (r[ck] != null) x.reliable++;
+        if (r.status === "SIN_LUZ") x.dark++;
+        if (r.status === "SENSOR_NO_DETECTADO") x.notSeen++;
+        if (r.status === "LECTURA_INCIERTA") x.uncertain++;
+        ["tempIn", "tempOut", "humidity"].forEach(function (k) { if (r[k] != null) { x.sum[k][0] += r[k]; x.sum[k][1]++; } });
+      });
+      hours.forEach(function (x) { ["tempIn", "tempOut", "humidity"].forEach(function (k) { x[k] = x.sum[k][1] ? x.sum[k][0] / x.sum[k][1] : null; }); delete x.sum; });
+      var gaps = [];
+      for (var i = 1; i < rs.length; i++) if (rs[i].ts - rs[i - 1].ts > gapAt(rs[i - 1].ts, rs[i].ts)) gaps.push({ from: rs[i - 1].ts, to: rs[i].ts, ms: rs[i].ts - rs[i - 1].ts });
+      var stats = {};
+      ["tempIn", "tempOut", "humidity"].forEach(function (k) { stats[k] = describe(rs.map(function (r) { return r[k]; })); });
+      var outOfRange = rs.filter(function (r) { return r.tempRange === "above" || r.tempRange === "below"; }).length;
+      // franjas horarias donde casi nada se pudo leer por falta de luz o porque no se veía el sensor
+      var blind = [], cur = null;
+      hours.forEach(function (x) {
+        var bad = x.n >= 2 && (x.dark + x.notSeen) / x.n >= 0.8;
+        if (bad) { if (cur && cur.to === x.h - 1) cur.to = x.h; else { cur = { from: x.h, to: x.h, dark: 0, notSeen: 0 }; blind.push(cur); } cur.dark += x.dark; cur.notSeen += x.notSeen; }
+      });
+      var pct = function (a, b) { return b ? Math.round((100 * a) / b) : 0; };
+      var findings = [];
+      var lbl = ck === "tempOut" ? "temperatura OUT (sonda)" : "temperatura IN";
+      if (!rs.length) findings.push({ level: "crit", text: "No hay lecturas en este periodo: el monitoreo no estuvo corriendo." });
+      else {
+        var rp = pct(reliable, rs.length);
+        findings.push({ level: rp >= 80 ? "ok" : rp >= 50 ? "warn" : "crit", text: rp + " % de las lecturas dieron una " + lbl + " confiable (" + reliable + " de " + rs.length + ")." });
+        blind.forEach(function (b) {
+          findings.push({ level: "crit", text: "De " + pad2(b.from) + ":00 a " + pad2(b.to) + ":59 casi no se pudo leer: " + (b.dark >= b.notSeen ? "estaba muy oscuro (hace falta luz sobre los sensores)" : "la cámara no veía el sensor como en la calibración (posible oscuridad, sensor o cámara movidos)") + "." });
+        });
+        if (byStatus.LECTURA_INCIERTA && pct(byStatus.LECTURA_INCIERTA, rs.length) >= 20) findings.push({ level: "warn", text: pct(byStatus.LECTURA_INCIERTA, rs.length) + " % de las lecturas fueron dudosas (dígitos poco claros): conviene recalibrar este sensor (Ajustes → Calibrar, escribiendo los valores reales)." });
+        gaps.forEach(function (g) { findings.push({ level: "warn", text: "Sin datos entre " + hh(g.from) + " y " + hh(g.to) + " (" + dur(g.ms) + "): el monitoreo no estaba corriendo (app cerrada, computador suspendido o apagado)." }); });
+        if (s.tempMin == null && s.tempMax == null) findings.push({ level: "warn", text: "No hay límites de temperatura configurados para " + s.name + ": la app no puede avisar si la temperatura sale de lo deseado (Ajustes → Sensores y límites)." });
+        if (outOfRange) findings.push({ level: "crit", text: outOfRange + " lectura(s) confiables fuera de tus límites de temperatura." });
+        if (stats[ck].n) findings.push({ level: "info", text: "La " + lbl + " estuvo entre " + num(stats[ck].min) + " y " + num(stats[ck].max) + " °C (promedio " + num(stats[ck].mean) + " °C, desviación " + num(stats[ck].sd) + " °C)." });
+      }
+      return { sensorId: s.id, sensorName: s.name, controlKey: ck, total: rs.length, reliable: reliable, reliablePct: rs.length ? (100 * reliable) / rs.length : null,
+        byStatus: byStatus, hours: hours, gaps: gaps, blind: blind, stats: stats, outOfRange: outOfRange, findings: findings, tempMin: s.tempMin, tempMax: s.tempMax };
+    });
   }
 
   /** Serie para gráficas: promedios por intervalo de los valores CONFIABLES. */
@@ -836,7 +929,7 @@
         flush();
       });
       // periodos sin datos
-      var gapMs = (S.noDataCycles + 0.5) * S.intervalSec * 1000;
+      var gapMs = (S.noDataCycles + 0.5) * maxIntervalSec(S) * 1000;
       for (var i = 1; i < rs.length; i++) {
         var dt = rs[i].ts - rs[i - 1].ts;
         if (dt > gapMs) items.push({ sensorId: s.id, kind: "gap", severity: "WARNING", text: s.name + ": sin lecturas entre " + fmtTime(rs[i - 1].ts) + " y " + fmtTime(rs[i].ts) + " (" + fmtDuration(dt) + ")." });
@@ -845,7 +938,7 @@
       var uncertain = rs.filter(function (r) { return r.condition === "ok" && !isReliable(r.level); }).length;
       var corrections = evs.filter(function (e) { return e.type === "OCR_CORRECTION"; }).length;
       var camera = rs.filter(function (r) { return r.condition === "camera_error"; }).length;
-      var notDet = rs.filter(function (r) { return r.condition === "not_detected" || r.condition === "blank"; }).length;
+      var notDet = rs.filter(function (r) { return r.condition === "not_detected" || r.condition === "blank" || r.condition === "dark"; }).length;
       var stale = evs.filter(function (e) { return e.type === "POSSIBLE_STALE_READING"; }).length;
       if (uncertain) items.push({ sensorId: s.id, kind: "uncertain", severity: "INFO", text: s.name + ": " + uncertain + " lectura(s) inciertas o de confianza baja (no se usaron como dato confiable)" + (corrections ? "; " + corrections + " corrección(es) de OCR registradas" : "") + "." });
       if (camera) items.push({ sensorId: s.id, kind: "camera", severity: "WARNING", text: s.name + ": " + camera + " ciclo(s) sin imagen de cámara." });
@@ -1084,7 +1177,7 @@
   function minutesOutOfRange(readings, sensor, now, S) {
     var ck = controlKey(sensor), mine = readings.filter(function (r) { return r.sensorId === sensor.id; }).sort(function (a, b) { return a.ts - b.ts; });
     var out = { tempHigh: 0, tempLow: 0, humHigh: 0, humLow: 0, covered: 0 };
-    var maxGap = (S.intervalSec || 60) * 1000 * 2.5;
+    var maxGap = maxIntervalSec(S) * 1000 * 2.5;
     for (var i = 0; i < mine.length; i++) {
       var r = mine[i], next = i + 1 < mine.length ? mine[i + 1].ts : Math.min(now, r.ts + (S.intervalSec || 60) * 1000);
       var dt = Math.min(next - r.ts, maxGap) / 60000;
@@ -1311,6 +1404,10 @@
   }
 
   root.MonLogic = {
+    intervalAt: intervalAt,
+    analyzePeriod: analyzePeriod,
+    maxIntervalSec: maxIntervalSec,
+    inWindowHM: inWindowHM,
     alertEpisodes: alertEpisodes,
     voteCaptures: voteCaptures,
     mergeAveraged: mergeAveraged,
