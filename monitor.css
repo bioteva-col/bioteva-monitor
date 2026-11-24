@@ -536,6 +536,10 @@ ol.cal-progress li[data-calstep], ol.cal-progress li[data-calsensor] { cursor: p
 .hour-table summary { cursor: pointer; font-weight: 600; margin-top: 6px; }
 .hour-table table { font-size: 13px; }
 .crit-text { color: var(--crit, #b3261e); }
+/* ── v23: «Necesita tu decisión» ── */
+.pending { margin-bottom: 14px; }
+.pending .act { margin-bottom: 8px; }
+.act.info { border-left-color: var(--line-strong); }
 /* ── v22: enfoque/zoom y selector de paso de gráficas ── */
 .cam-tune { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .cam-tune input[type="range"] { width: 100%; }

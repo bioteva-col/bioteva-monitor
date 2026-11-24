@@ -192,16 +192,25 @@
     };
   }
 
+  /**
+   * Límites INICIALES pedidos por la persona (24-nov-2026), tomados de lo ya definido en el proyecto:
+   * temperatura 28–32 °C = perfiles «ninfas» y «adultos» de Acheta domesticus del control térmico
+   * (js/thermal.js); humedad 50–70 % = «HR óptima» de la especificación del simulador
+   * (SIMULADOR/BIOTEVA_02_Especificacion_Simulador_v2.md). Quedan marcados como «predeterminados»
+   * hasta que la persona los confirme o los cambie.
+   */
+  var DEFAULT_LIMITS = { tempMin: 28, tempMax: 32, humMin: 50, humMax: 70 };
   function defaultSensor(id) {
     return {
       id: id,
       name: "Sensor " + id,
       enabled: true,
       controlTemp: "out", // OUT = sonda dentro de la caja (temperatura de caja)
-      tempMin: null,
-      tempMax: null,
-      humMin: null,
-      humMax: null,
+      tempMin: DEFAULT_LIMITS.tempMin,
+      tempMax: DEFAULT_LIMITS.tempMax,
+      humMin: DEFAULT_LIMITS.humMin,
+      humMax: DEFAULT_LIMITS.humMax,
+      limitsDefault: true,
       cameraDeviceId: null,
       calibration: defaultCalibration(id),
     };
@@ -1413,6 +1422,7 @@
 
   root.MonLogic = {
     intervalAt: intervalAt,
+    DEFAULT_LIMITS: DEFAULT_LIMITS,
     STORE_OPTIONS: STORE_OPTIONS,
     CHART_STEPS: CHART_STEPS,
     analyzePeriod: analyzePeriod,

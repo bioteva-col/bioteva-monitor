@@ -113,7 +113,7 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
   // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
-  const APP_VERSION = "v22", APP_DATE = "24-nov-2026";
+  const APP_VERSION = "v23", APP_DATE = "24-nov-2026";
   const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
   const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   /**
@@ -1218,7 +1218,8 @@
         '<span class="s">' + (!d.n ? "sin lecturas hoy" : !hasLim ? "sin límites configurados" : outMin + outH ? "fuera de límites: " + esc(fmtDur(outMin * 60000)) + " temp. · " + esc(fmtDur(outH * 60000)) + " humedad" : "todo el día dentro de tus límites") + "</span></div>");
     }
 
-    const todoHtml = '<aside class="todo-col col"><div class="todo-head"><h2>Qué hacer ahora</h2><span class="muted-text">' + esc(fmtHour(now)) + "</span></div>" +
+    const pend = await pendingInputs();
+    const todoHtml = '<aside class="todo-col col">' + (pend.length ? pendingHtml(pend) : "") + '<div class="todo-head"><h2>Qué hacer ahora</h2><span class="muted-text">' + esc(fmtHour(now)) + "</span></div>" +
       todo.map((t, i) => {
         const b = actButton(t);
         return '<div class="act ' + t.level + '"><div class="act-meta"><span class="lvl">' + ACT_LVL[t.level] + "</span>" + (t.level !== "good" ? '<span class="kind">' + esc(ACT_KIND[t.kind] || "") + "</span>" : "") + "</div>" +
@@ -1298,6 +1299,7 @@
       "</div>" + lastRecordsHtml(recent3h.length >= 12 ? recent3h : today.length >= 12 ? today : await App.store.readingsRange(now - 2 * DAY, now));
 
     renderCamPicker();
+    bindPending(host);
     const cs = $("#chartStep", host);
     if (cs) cs.addEventListener("change", async () => { await saveSettings({ chartStepMin: Number(cs.value) }); renderDashboard(); });
     requestAnimationFrame(() => { host.style.minHeight = ""; if (Math.abs(window.scrollY - keepY) > 2) window.scrollTo(0, keepY); });
@@ -2178,7 +2180,9 @@
           "<td>" + inp(s, "tempMin") + "</td><td>" + inp(s, "tempMax") + "</td><td>" + inp(s, "humMin") + "</td><td>" + inp(s, "humMax") + "</td>" +
           '<td class="cal">' + (s.calibration.accepted ? '<span class="chip soft good">' + ico("ok", 14) + "Lista</span> " : '<span class="chip soft warn">' + ico("warn", 14) + "Falta</span> ") + '<a class="btn ghost small" href="#calibracion" data-cal-go="' + esc(s.id) + '">Calibrar</a></td></tr>',
         ).join("") +
-        '</tbody></table></div><p class="form-err" hidden></p>' +
+        '</tbody></table></div>' +
+      (App.sensors.some((s) => s.limitsDefault) ? '<p class="hint">Límites <b>iniciales</b> (predeterminados): temperatura ' + L.DEFAULT_LIMITS.tempMin + "–" + L.DEFAULT_LIMITS.tempMax + " °C (perfiles de ninfas y adultos de Acheta domesticus del control térmico) y humedad " + L.DEFAULT_LIMITS.humMin + "–" + L.DEFAULT_LIMITS.humMax + " % (HR óptima del simulador). Ajústalos a tu etapa de cría y toca «Guardar» para confirmarlos.</p>" : "") +
+      '<p class="form-err" hidden></p>' +
       "</div></form>";
     $("#sensForm").addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -2193,7 +2197,7 @@
       const err = $(".form-err", ev.target);
       if (errs.length) { err.hidden = false; err.textContent = errs.join(" — "); return; }
       err.hidden = true;
-      next.forEach(([s, cand, name, ct, en]) => Object.assign(s, cand, { name, controlTemp: ct, enabled: en }));
+      next.forEach(([s, cand, name, ct, en]) => Object.assign(s, cand, { name, controlTemp: ct, enabled: en, limitsDefault: false }));
       await saveSensors();
       toast("Límites guardados.");
       renderSensors();
@@ -2363,6 +2367,50 @@
       "</div></article>";
   }
 
+  /**
+   * Lo que la app NO puede resolver sola y necesita a la persona: confirmar límites predeterminados,
+   * permiso de cámara, carpeta de reportes, canales de alerta, luz nocturna, recalibrar un sensor.
+   * Cada ítem: { id, level, title, text, btn: [texto, acción] }.
+   */
+  async function pendingInputs() {
+    const out = [], now = Date.now(), S = App.settings;
+    const def = App.sensors.filter((s) => s.enabled && s.limitsDefault);
+    if (def.length) out.push({ id: "limits", level: "warn", title: "Confirma los límites de " + def.map((s) => s.name).join(" y "), text: "Se usan los límites iniciales: temperatura " + L.DEFAULT_LIMITS.tempMin + "–" + L.DEFAULT_LIMITS.tempMax + " °C y humedad " + L.DEFAULT_LIMITS.humMin + "–" + L.DEFAULT_LIMITS.humMax + " %. Cámbialos si tu etapa de cría necesita otros y toca «Guardar».", btn: ["Revisar límites", "go:sensores"] });
+    if (S.frameSource === "camera" && App.cam.needsPermission) out.push({ id: "cam", level: "crit", title: "Falta el permiso de la cámara", text: "La lectura está detenida. Toca el botón y elige «Permitir» (no «Permitir esta vez»).", btn: ["Activar cámara", "camperm"] });
+    const dir = await getSaveDir();
+    if (!dir.handle && !App.backupDirOk) out.push({ id: "dir", level: "warn", title: "Elige dónde guardar los reportes diarios", text: "Sin carpeta, el Excel, el reporte y la copia de cada día no se guardan en el computador.", btn: ["Elegir carpeta", "savedir"] });
+    else if (dir.handle && dir.perm !== "granted") out.push({ id: "dirperm", level: "warn", title: "Confirma el permiso de la carpeta «" + dir.handle.name + "»", text: "Chrome pide confirmarlo para seguir guardando (elige «Permitir en cada visita»).", btn: ["Permitir guardar", "saveperm"] });
+    let al = null;
+    try { al = window.MonThermalUI && window.MonThermalUI.api ? await window.MonThermalUI.api("GET", "/api/alerts") : null; } catch (e) { al = null; }
+    if (al && al.alerts && !(al.alerts.email.enabled && al.alerts.email.hasPass) && !(al.alerts.telegram.enabled && al.alerts.telegram.hasToken && al.alerts.telegram.chatId)) out.push({ id: "chan", level: "warn", title: "Activa las alertas por correo o Telegram", text: "Hoy solo suenan en este computador. Falta la contraseña de aplicación de Gmail o el token del bot Bioteva_ops_bot.", btn: ["Configurar alertas", "go:datos"] });
+    else if (!al) out.push({ id: "svc", level: "info", title: "El servicio local no está corriendo", text: "Sin él no hay correos, Telegram ni vigilante que reabra la app. Se instala con el paquete y necesita Node.js.", btn: null });
+    const day = await App.store.readingsRange(now - DAY, now);
+    App.sensors.filter((s) => s.enabled).forEach((s) => {
+      const rs = day.filter((r) => r.sensorId === s.id && r.source !== "simulation"), ck = L.controlKey(s);
+      if (rs.length < 10) return;
+      const ok = rs.filter((r) => r[ck] != null).length, dark = rs.filter((r) => r.status === "SIN_LUZ").length;
+      if (dark / rs.length >= 0.2) out.push({ id: "light-" + s.id, level: "warn", title: "Hace falta luz para " + s.name, text: Math.round((100 * dark) / rs.length) + " % de las lecturas de las últimas 24 h estaban a oscuras. Pon una lámpara cerca de los sensores para la noche.", btn: null });
+      else if (ok / rs.length < 0.5) out.push({ id: "cal-" + s.id, level: "warn", title: "Recalibra " + s.name, text: "Solo " + Math.round((100 * ok) / rs.length) + " % de sus lecturas de las últimas 24 h fueron confiables. En Calibrar, paso «Compara», escribe los valores reales del sensor.", btn: ["Ir a calibrar", "go:calibracion"] });
+    });
+    return out;
+  }
+  function pendingHtml(items) {
+    if (!items.length) return '<div class="panel pending ok"><header><h2>Necesita tu decisión</h2></header><div class="panel-body"><p class="muted-text">' + ico("ok", 16) + " Nada pendiente de tu parte.</p></div></div>";
+    return '<div class="panel pending"><header><h2>Necesita tu decisión (' + items.length + ')</h2></header><div class="panel-body col">' +
+      items.map((p) => '<div class="act ' + (p.level === "crit" ? "crit" : p.level === "info" ? "info" : "warn") + '"><div class="act-title">' + esc(p.title) + "</div><p>" + esc(p.text) + "</p>" +
+        (p.btn ? '<div><button class="btn on-act" type="button" data-pend="' + esc(p.btn[1]) + '">' + esc(p.btn[0]) + "</button></div>" : "") + "</div>").join("") + "</div></div>";
+  }
+  function bindPending(host) {
+    $$("[data-pend]", host).forEach((b) => b.addEventListener("click", async () => {
+      const a = b.dataset.pend;
+      if (a.startsWith("go:")) return showView(a.slice(3));
+      if (a === "camperm") await startCameras();
+      if (a === "savedir") await chooseSaveDir();
+      if (a === "saveperm") { const d = await getSaveDir(); try { await d.handle.requestPermission({ mode: "readwrite" }); } catch (e) { /* cancelado */ } autoBackupCheck(); }
+      renderBanners(); renderView();
+    }));
+  }
+
   async function renderAlerts() {
     const host = $('section[data-view="alertas"]');
     const now = Date.now(), S = App.settings;
@@ -2382,10 +2430,12 @@
         (eps.some((e) => e.status !== "Reconocida") ? '<button class="btn" id="ackAll" type="button">Reconocer todas</button>' : "") +
       "</div></div>" +
       (live.length ? '<div class="banner warn">' + ico("warn", 20) + "<span><b>Ahora mismo no llegan lecturas de " + esc(live.map((x) => x.s.name).join(" y ")) + ".</b> Revisa que la cámara esté activa y la ventana de la app abierta. La app no sabe la causa.</span></div>" : "") +
+      pendingHtml(await pendingInputs()) +
       '<p class="muted-text">Varias alertas iguales seguidas se juntan en un solo episodio. «Activa» = sigue pasando; «Resuelta» = volvió a la normalidad; «Reconocida» = ya la viste.</p>' +
       (shown.length ? '<div class="ep-list">' + list + "</div>"
         : '<div class="empty">' + ico("ok", 28) + "<b>" + (App.alertTab === "active" ? "No hay alertas activas" : "No hay alertas") + '</b><span class="muted-text">En los últimos 30 días.</span></div>') +
       '<p class="hint">Cuándo avisa la app: cambio de ±' + esc(fmt(S.tempChangeThreshold)) + " °C o ±" + esc(fmt(S.humidityChangeThreshold, 1)) + " % en " + S.changeWindowMin + " min · " + S.confirmReadings + " lecturas seguidas para confirmar un valor fuera de tus límites · sin datos tras " + S.noDataCycles + ' lecturas perdidas. <a href="#configuracion" data-go="configuracion">Cambiar</a>.</p>';
+    bindPending(host);
     const byId = {};
     eps.forEach((e) => (byId[e.id] = e));
     $$("[data-atab]", host).forEach((b) => b.addEventListener("click", () => { App.alertTab = b.dataset.atab; renderAlerts(); }));
@@ -3031,8 +3081,16 @@
     }
     App.migrateContinuous = !!saved && (saved.cfgV || 0) < 6;
     if (App.migrateContinuous) Object.assign(saved, { intervalSec: 10, nightIntervalSec: 0, energySaver: false, storeEverySec: 60, chartStepMin: 5 });
-    if (saved) saved.cfgV = 6;
+    App.migrateLimits = !!saved && (saved.cfgV || 0) < 7;
+    if (saved) saved.cfgV = 7;
     App.settings = L.validateSettings(saved || {}).value;
+    if (App.migrateLimits) {
+      let changed = false;
+      App.sensors.forEach((s) => {
+        if (s.tempMin == null && s.tempMax == null && s.humMin == null && s.humMax == null) { Object.assign(s, L.DEFAULT_LIMITS, { limitsDefault: true }); changed = true; }
+      });
+      if (changed) { await saveSensors(); setTimeout(() => toast("Se pusieron límites iniciales: temperatura 28–32 °C y humedad 50–70 %. Revísalos en Alertas → «Necesita tu decisión»."), 4000); }
+    }
     if (App.migrateSchedule || App.migrateContinuous) { await App.store.setKV("settings", App.settings); setTimeout(() => toast("Lectura continua: la cámara lee cada 10 s y queda encendida; se guarda una lectura por minuto (y siempre los cambios y alertas); gráficas con un punto cada 5 min. Se cambia en Ajustes → Lectura y alertas."), 2500); }
     App.problems = (await App.store.getKV("problems")) || [];
     window.addEventListener("error", (e) => logProblem("programa", (e.message || "Error") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : "")));
