@@ -2587,7 +2587,11 @@
   };
   var CHANGE_TYPES = ["TEMPERATURE_INCREASE", "TEMPERATURE_DECREASE", "HUMIDITY_INCREASE", "HUMIDITY_DECREASE"];
 
-  var INTERVAL_OPTIONS = [30, 60, 120, 300, 600, 900, 1800, 3600];
+  var INTERVAL_OPTIONS = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+  /** Cada cuánto se GUARDA una lectura cuando nada cambia (se lee más seguido; los cambios y alertas se guardan siempre). */
+  var STORE_OPTIONS = [10, 30, 60, 120, 300];
+  /** Paso de las gráficas (minutos): cada punto es el promedio de ese intervalo. */
+  var CHART_STEPS = [1, 5, 10, 30, 60];
 
   /** Parámetros de DETECCIÓN (no son límites biológicos). */
   var DEFAULT_SETTINGS = {
@@ -2623,6 +2627,8 @@
     energySaver: true, // apaga la cámara entre lecturas cuando el intervalo es de 5 min o más
     sound: true,       // sonido en la app ante alertas
     darkLevel: 30,     // brillo medio de la pantalla del sensor (0–255) por debajo del cual «no hay luz»
+    storeEverySec: 60, // lectura continua: guarda una lectura por minuto si nada cambia
+    chartStepMin: 5,   // gráficas: un punto cada 5 min
   };
 
   var NUMERIC_RULES = {
@@ -2667,6 +2673,8 @@
     s.energySaver = !!s.energySaver;
     s.sound = !!s.sound;
     s.nightIntervalSec = Number(s.nightIntervalSec) || 0;
+    s.storeEverySec = STORE_OPTIONS.indexOf(Number(s.storeEverySec)) >= 0 ? Number(s.storeEverySec) : 60;
+    s.chartStepMin = CHART_STEPS.indexOf(Number(s.chartStepMin)) >= 0 ? Number(s.chartStepMin) : 5;
     if (s.nightIntervalSec && INTERVAL_OPTIONS.indexOf(s.nightIntervalSec) < 0) errors.push("nightIntervalSec: valor no permitido");
     if (!/^\d{1,2}:\d{2}$/.test(s.nightFrom || "") || !/^\d{1,2}:\d{2}$/.test(s.nightTo || "")) errors.push("La franja de noche va como HH:MM");
     return { ok: errors.length === 0, value: s, errors: errors };
@@ -3062,7 +3070,7 @@
 
     // ---- periodo sin datos ----
     if (prevAny && now - prevAny.ts > (S.noDataCycles + 0.5) * Math.max(intervalAt(S, prevAny.ts), intervalAt(S, now)) * 1000) {
-      emit("DATA_GAP", "WARNING", null, round1((now - prevAny.ts) / 60000), null, null,
+      emit("DATA_GAP", now - prevAny.ts >= 15 * 60000 ? "WARNING" : "INFO", null, round1((now - prevAny.ts) / 60000), null, null,
         "Sin lecturas de " + name + " entre " + fmtTime(prevAny.ts) + " y " + fmtTime(now) + " (" + fmtDuration(now - prevAny.ts) + "). Posible interrupción del monitoreo (equipo apagado, suspendido o navegador cerrado). Se requiere verificación.");
     }
 
@@ -3939,6 +3947,8 @@
 
   root.MonLogic = {
     intervalAt: intervalAt,
+    STORE_OPTIONS: STORE_OPTIONS,
+    CHART_STEPS: CHART_STEPS,
     analyzePeriod: analyzePeriod,
     maxIntervalSec: maxIntervalSec,
     inWindowHM: inWindowHM,
@@ -5240,7 +5250,7 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
   // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
-  const APP_VERSION = "v21", APP_DATE = "23-nov-2026";
+  const APP_VERSION = "v22", APP_DATE = "24-nov-2026";
   const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
   const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   /**
@@ -5258,6 +5268,16 @@
     const files = [{ name: base + ".json", text: JSON.stringify(data) }];
     try { const y = L.dayKey(now - DAY); files.push({ name: "bioteva-monitor_" + y + "_reporte.html", text: await buildDayReportHtml(y) }); } catch (e) { /* sin reporte */ }
     try { files.push({ name: base + ".xlsx", base64: u8ToB64(new Uint8Array(await buildWorkbook(rs, es, App.sensors, App.settings, from, now))) }); } catch (e) { /* sin Excel: queda el JSON */ }
+    files.push({ name: "bioteva-monitor_" + stamp() + "_problemas.html", text: await buildProblemsHtml(7) });
+    let folderName = null, folderErr = null;
+    try { folderName = await writeToSaveDir(files); } catch (e) { folderErr = e.message; }
+    if (folderName) {
+      const info = { ts: now, reason, dir: "carpeta «" + folderName + "»", files: files.map((f) => f.name), readings: data.readings.length };
+      await App.store.setKV("lastPcBackup", info);
+      App.backupError = null; App.backupDirOk = true;
+      if (window.MonThermalUI && window.MonThermalUI.online) fetch(BACKUP_URL, { method: "POST", headers: { "content-type": "application/json", "x-bioteva": "1" }, body: JSON.stringify({ files }) }).catch(() => {});
+      return info;
+    }
     const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 60000);
     try {
       const r = await fetch(BACKUP_URL, { method: "POST", headers: { "content-type": "application/json", "x-bioteva": "1" }, body: JSON.stringify({ files }), signal: ctl.signal });
@@ -5265,10 +5285,12 @@
       if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
       const info = { ts: now, reason, dir: j.dir, files: j.saved, readings: data.readings.length };
       await App.store.setKV("lastPcBackup", info);
-      App.backupError = null;
+      App.backupError = null; App.backupDirOk = true;
       return info;
     } catch (e) {
-      throw new Error(e.name === "AbortError" ? "tardó demasiado" : /fetch/i.test(e.message) ? "el servicio local (puerto 4479) no responde" : e.message);
+      const m = e.name === "AbortError" ? "tardó demasiado" : /fetch/i.test(e.message) ? "no hay carpeta elegida ni servicio local (puerto 4479)" : e.message;
+      logProblem("guardado", "No se guardó la copia diaria: " + (folderErr && folderErr !== "no hay carpeta elegida" ? folderErr : m));
+      throw new Error(folderErr && folderErr !== "no hay carpeta elegida" ? folderErr : m);
     } finally { clearTimeout(to); }
   }
   /**
@@ -5343,6 +5365,37 @@
       "</dl><footer>La app no inventa límites para los grillos ni afirma causas: los límites los define la persona y los hallazgos describen lo medido.</footer></main></body></html>";
   }
 
+  const PROBLEM_ACTIONS = {
+    CAMERA_FAILURE: "Revisa que la cámara esté conectada y con permiso («Permitir», no «Permitir esta vez»). Toca «Activar cámara».",
+    SENSOR_NOT_DETECTED: "La imagen no se parece a la calibración: revisa que nada tape el sensor, que la cámara no se haya movido y que haya luz. Si se movió, recalibra.",
+    TOO_DARK: "Pon una luz cerca de los sensores para las lecturas de noche.",
+    POSSIBLE_DISCONNECTION: "La pantalla del sensor no muestra dígitos: revisa la pila del HTC-2 o que no esté tapado.",
+    OCR_UNCERTAIN: "Dígitos poco claros: acerca la cámara, mejora el enfoque (Ajustes → Cámara) o recalibra escribiendo los valores reales.",
+    OCR_FAILURE: "No se pudo leer: recalibra ese sensor.",
+    LOW_CONFIDENCE: "Lecturas dudosas seguidas: recalibra o mejora la luz/enfoque.",
+    DATA_GAP: "Hubo minutos sin lecturas: deja la app abierta, el computador sin suspender y la cámara con permiso.",
+    POSSIBLE_STALE_READING: "El valor no cambia: revisa que la pantalla del sensor esté encendida y la imagen no esté congelada.",
+    TEMPERATURE_ABOVE_LIMIT: "Temperatura sobre tu límite: revisa la caja.",
+    TEMPERATURE_BELOW_LIMIT: "Temperatura bajo tu límite: revisa la caja y la lámpara de calor.",
+  };
+  /** Resumen de problemas de los últimos días: eventos agrupados + fallas de la app, con qué hacer. */
+  async function buildProblemsHtml(days) {
+    const now = Date.now(), from = now - days * DAY;
+    const evs = (await App.store.eventsRange(from, now)).filter((e) => e.source !== "simulation" && (e.severity !== "INFO" || ["DATA_GAP", "OCR_UNCERTAIN"].indexOf(e.type) >= 0));
+    const groups = {};
+    evs.forEach((e) => { const k = e.type + "|" + (e.sensorId || ""); const g = (groups[k] = groups[k] || { type: e.type, sensorId: e.sensorId, n: 0, first: e.ts, last: e.ts, sample: e.description, sev: e.severity }); g.n++; g.first = Math.min(g.first, e.ts); g.last = Math.max(g.last, e.ts); if (e.severity === "CRITICAL") g.sev = "CRITICAL"; });
+    const rows = Object.values(groups).sort((a, b) => (a.sev === "CRITICAL" ? -1 : 0) - (b.sev === "CRITICAL" ? -1 : 0) || b.n - a.n);
+    const probs = (App.problems || []).filter((p) => p.lastTs >= from).slice().reverse();
+    const e = (s) => esc(String(s == null ? "" : s));
+    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><title>BioTeva · Resumen de problemas</title><style>body{font:14px/1.5 system-ui,sans-serif;margin:24px;color:#4A3728;background:#FAF6EE}h1{color:#1A4D2E}table{border-collapse:collapse;width:100%;background:#fff;margin:10px 0 24px}th,td{border:1px solid #E2D8C3;padding:6px 8px;vertical-align:top;text-align:left}th{background:#F5EED9}.CRITICAL{color:#C62828;font-weight:700}.WARNING{color:#B26A00}</style></head><body>' +
+      "<h1>Resumen de problemas · últimos " + days + " días</h1><p>BioTeva Monitor " + APP_VERSION + " · generado " + e(L.fmtDateTime(now)) + ". Cada fila agrupa un mismo problema: cuántas veces, desde y hasta cuándo, un ejemplo y qué hacer.</p>" +
+      "<h2>Problemas detectados en las lecturas</h2>" + (rows.length ? "<table><thead><tr><th>Problema</th><th>Sensor</th><th>Veces</th><th>Primera vez</th><th>Última vez</th><th>Qué hacer</th><th>Ejemplo</th></tr></thead><tbody>" +
+        rows.map((g) => '<tr><td class="' + g.sev + '">' + e(L.EVENT_LABELS[g.type] || g.type) + "</td><td>" + e(g.sensorId ? (sensorById(g.sensorId) || {}).name : "") + "</td><td>" + g.n + "</td><td>" + e(L.fmtDateTime(g.first)) + "</td><td>" + e(L.fmtDateTime(g.last)) + "</td><td>" + e(PROBLEM_ACTIONS[g.type] || "") + "</td><td>" + e(g.sample) + "</td></tr>").join("") + "</tbody></table>" : "<p>Sin problemas en las lecturas.</p>") +
+      "<h2>Fallas de la app (cámara, guardado, programa)</h2>" + (probs.length ? "<table><thead><tr><th>Tipo</th><th>Mensaje</th><th>Veces</th><th>Desde</th><th>Hasta</th></tr></thead><tbody>" +
+        probs.map((p) => "<tr><td>" + e(p.kind) + "</td><td>" + e(p.message) + "</td><td>" + p.count + "</td><td>" + e(L.fmtDateTime(p.ts)) + "</td><td>" + e(L.fmtDateTime(p.lastTs)) + "</td></tr>").join("") + "</tbody></table>" : "<p>Sin fallas registradas.</p>") +
+      "</body></html>";
+  }
+
   /** Una copia al día (y al actualizar la versión). Si el servicio local no está, lo reintenta luego. */
   async function autoBackupCheck(reason) {
     try {
@@ -5351,6 +5404,7 @@
       if ((await App.store.countReadings()) === 0) return;
       await saveBackupToPc(reason || "diario");
     } catch (e) { App.backupError = e.message; }
+    if (App.backupError) renderBanners();
   }
   /** Registra el cambio de versión y avisa que las lecturas siguen ahí. */
   async function checkVersion() {
@@ -5408,7 +5462,7 @@
     try {
       let all = await navigator.mediaDevices.enumerateDevices();
       // Sin permiso, Chrome devuelve las cámaras sin nombre ni id: no se pueden elegir. Se pide permiso un instante.
-      if (ask && all.some((d) => d.kind === "videoinput" && !d.deviceId) && navigator.mediaDevices.getUserMedia) {
+      if (ask && all.some((d) => d.kind === "videoinput" && !d.deviceId) && navigator.mediaDevices.getUserMedia && ((await camPermission()) === "granted" || Date.now() - (App.gestureAt || 0) < 8000)) {
         try { const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); tmp.getTracks().forEach((t) => t.stop()); all = await navigator.mediaDevices.enumerateDevices(); }
         catch (e) { toast(cameraErrorMessage(e), "warn"); }
       }
@@ -5450,7 +5504,27 @@
     setCamStatus("off");
   }
 
+  /** Estado del permiso de cámara: "granted" | "prompt" | "denied" | "unknown". */
+  async function camPermission() {
+    try { const p = await navigator.permissions.query({ name: "camera" }); return p.state; } catch (e) { return "unknown"; }
+  }
+  document.addEventListener("pointerdown", () => { App.gestureAt = Date.now(); }, true);
+  document.addEventListener("keydown", () => { App.gestureAt = Date.now(); }, true);
+
   async function startCameras() {
+    // Sin permiso concedido, abrir la cámara muestra el aviso de Chrome: solo se intenta si la persona
+    // acaba de tocar algo (botón). Los reintentos automáticos NO vuelven a pedir permiso cada 30 s.
+    const perm = await camPermission();
+    if (perm !== "granted" && perm !== "unknown" && Date.now() - (App.gestureAt || 0) > 8000) {
+      App.cam.lastTry = Date.now();
+      App.cam.needsPermission = true;
+      setCamStatus("error", perm === "denied" ? "Chrome tiene BLOQUEADA la cámara para esta app. Toca el candado o el ícono de cámara de la barra de direcciones → Cámara: Permitir, y luego «Activar cámara»." : "La cámara necesita tu permiso. Toca «Activar cámara» y en el aviso de Chrome elige «Permitir» (NO «Permitir esta vez»: ese permiso caduca y la lectura se detiene).");
+      renderBanners();
+      if (App.running) loudAlert("La cámara necesita permiso", "La lectura está detenida hasta que toques «Activar cámara» y permitas la cámara.", "camperm");
+      logProblem("cámara", "Sin permiso de cámara (" + perm + "): lectura detenida hasta que la persona lo conceda");
+      return;
+    }
+    App.cam.needsPermission = false;
     if (!window.isSecureContext) return setCamStatus("error", "La cámara solo funciona en un origen seguro: ábrela como extensión, en http://localhost o por https.");
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return setCamStatus("error", "Este navegador no permite usar la cámara (getUserMedia no disponible).");
     stopCameras();
@@ -5481,6 +5555,7 @@
         const track = stream.getVideoTracks()[0];
         const real = (track.getSettings && track.getSettings().deviceId) || id;
         track.addEventListener("ended", () => setCamStatus("error", "La cámara se desconectó o dejó de enviar imagen (" + track.label + ")."));
+        await applyTune(track);
         const st = (track.getSettings && track.getSettings()) || {};
         App.cam.streams.push({ requested: id, deviceId: real, label: (track.label || "Cámara") + (st.width ? " · " + st.width + "×" + st.height : ""), stream, video, canvas: document.createElement("canvas") });
         if (App.settings.cameraMode === "single" && real && real !== App.settings.cameraDeviceId) await saveSettings({ cameraDeviceId: real, cameraLabel: track.label || App.settings.cameraLabel || null });
@@ -5489,9 +5564,11 @@
       setCamStatus("active");
       await refreshDevices();
       renderCamPicker();
+      renderCamTune();
     } catch (e) {
       stopCameras();
       setCamStatus("error", cameraErrorMessage(e));
+      logProblem("cámara", cameraErrorMessage(e));
     }
   }
 
@@ -5756,12 +5833,12 @@
       const active = App.sensors.filter((s) => s.enabled);
       if (S.frameSource === "camera" && App.cam.status !== "active") {
         await startCameras();
-        await new Promise((r) => setTimeout(r, 2500)); // la cámara ajusta exposición y foco
+        await sleep(2500); // la cámara ajusta exposición y foco
       }
       // luz de lectura (enchufe TP-Link): se enciende, se espera a que la cámara ajuste la exposición, y se apaga al final
       if (S.frameSource === "camera" && window.MonThermalUI && window.MonThermalUI.readingLight) {
         const lead = await window.MonThermalUI.readingLight(true);
-        if (lead) { App.lightOn = true; await new Promise((r) => setTimeout(r, Math.min(lead, 60000))); }
+        if (lead) { App.lightOn = true; await sleep(Math.min(lead, 60000)); }
       }
       const frames = new Map(active.map((s) => [s.id, grabFrame(s, cache, now, true)]));
       trackFrames((s) => frames.get(s.id));
@@ -5769,7 +5846,7 @@
       const extra = new Map(active.map((s) => [s.id, []]));
       if (S.frameSource === "camera") {
         for (let i = 1; i < VOTE_FRAMES; i++) {
-          await new Promise((r) => setTimeout(r, VOTE_GAP_MS));
+          await sleep(VOTE_GAP_MS);
           const c2 = {};
           active.forEach((s) => { const f = grabFrame(s, c2, now, true); if (f && !f.error) extra.get(s.id).push(f); });
         }
@@ -5809,7 +5886,12 @@
         if (fr && fr.canvas && (S.saveSnapshots === "all" || (S.saveSnapshots === "events" && important))) {
           try { res.reading.snapshotId = await App.store.addSnapshot(await canvasToJpeg(fr.canvas), { ts: now, sensorId: sensor.id, readingId: res.reading.id }); } catch (e) { /* la evidencia es opcional */ }
         }
-        await App.store.saveCycle([res.reading], res.events);
+        App.lastSaved = App.lastSaved || {};
+        const prevSaved = App.lastSaved[sensor.id], rd = res.reading, ckey = L.controlKey(sensor);
+        const keep = S.frameSource !== "camera" || !prevSaved || now - prevSaved.ts >= (S.storeEverySec || 60) * 1000 || rd.status !== prevSaved.status ||
+          res.events.some((e) => e.severity !== "INFO") || (rd[ckey] == null) !== (prevSaved[ckey] == null) ||
+          (rd[ckey] != null && Math.abs(rd[ckey] - prevSaved[ckey]) >= 0.3) || (rd.humidity != null && prevSaved.humidity != null && Math.abs(rd.humidity - prevSaved.humidity) >= 3);
+        if (keep) { await App.store.saveCycle([res.reading], res.events); App.lastSaved[sensor.id] = res.reading; }
         App.latest[sensor.id] = res.reading;
         results.push(res);
       }
@@ -5823,12 +5905,13 @@
       if (window.MonThermalUI) window.MonThermalUI.onCycle(results); // temperatura de caja → gateway térmico
     } catch (e) {
       toast("Error en el ciclo de lectura: " + (e && e.message ? e.message : e), "crit");
+      logProblem("ciclo", "Error en el ciclo de lectura: " + (e && e.message ? e.message : e));
     } finally {
       if (App.lightOn) { App.lightOn = false; window.MonThermalUI.readingLight(false); }
       App.busy = false;
       if (App.running) App.nextAt = now + L.intervalAt(S, now) * 1000;
       // Ahorro: con lecturas cada 5 min o más, la cámara se apaga hasta la próxima (no en Cámara/Calibrar).
-      if (App.running && S.frameSource === "camera" && S.energySaver && L.intervalAt(S, now) >= 300 && ["camara", "calibracion"].indexOf(App.view) < 0 && App.cam.status === "active") {
+      if (App.running && S.frameSource === "camera" && S.energySaver && !App.isExtension && L.intervalAt(S, now) >= 1800 && ["camara", "calibracion"].indexOf(App.view) < 0 && App.cam.status === "active") {
         stopCameras();
         setCamStatus("standby");
       }
@@ -5841,8 +5924,14 @@
   }
 
   /** Sonido de alerta (Web Audio): 3 pitidos. Chrome lo permite tras haber tocado la app una vez. */
-  function alarmSound(times) {
+  function alarmSound(times, key) {
     if (!App.settings.sound) return;
+    if (times) {
+      App.soundAt = App.soundAt || {};
+      const k = key || "general", t = Date.now();
+      if (App.soundAt[k] && t - App.soundAt[k] < 10 * 60000) return; // no pitar sin parar por el mismo problema
+      App.soundAt[k] = t;
+    }
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       App.audio = App.audio || new Ctx();
@@ -5858,7 +5947,7 @@
   /** Aviso fuerte en la app: sonido + notificación del sistema + mensaje. */
   function loudAlert(title, body, key) {
     toast(title + ": " + body, "crit");
-    alarmSound(3);
+    alarmSound(3, key || title);
     if ("Notification" in window && Notification.permission === "granted") {
       try { new Notification("BioTeva · " + title, { body, icon: "icons/icon-128.png", tag: key || title, requireInteraction: true }); } catch (e) { /* opcional */ }
     }
@@ -5890,8 +5979,27 @@
     });
   }
 
+  /** Espera que Chrome NO frena en segundo plano (la hace el Worker del reloj). */
+  App.sleeps = {};
+  let sleepSeq = 0;
+  function sleep(ms) {
+    if (!App.ticker) return new Promise((r) => setTimeout(r, ms));
+    return new Promise((r) => { const id = ++sleepSeq; App.sleeps[id] = r; App.ticker.postMessage({ sleep: id, ms }); });
+  }
+  /** Problemas de la app (errores de programa, cámara, guardado): quedan para el «Resumen de problemas». */
+  function logProblem(kind, message) {
+    App.problems = App.problems || [];
+    const last = App.problems[App.problems.length - 1];
+    if (last && last.kind === kind && last.message === message) { last.count++; last.lastTs = Date.now(); }
+    else App.problems.push({ ts: Date.now(), lastTs: Date.now(), kind, message: String(message).slice(0, 500), count: 1 });
+    if (App.problems.length > 300) App.problems.shift();
+    clearTimeout(App.problemsSave);
+    App.problemsSave = setTimeout(() => App.store && App.store.setKV("problems", App.problems).catch(() => {}), 2000);
+  }
+
   function notifyEvents(events) {
-    if (events.some((e) => e.severity === "CRITICAL")) alarmSound(3);
+    events.filter((e) => e.severity === "CRITICAL").forEach((e) => alarmSound(3, e.type + (e.sensorId || "")));
+    events.filter((e) => e.severity !== "INFO").forEach((e) => logProblem("evento", (L.EVENT_LABELS[e.type] || e.type) + (e.sensorId ? " · " + (sensorById(e.sensorId) || {}).name : "")));
     events.filter((e) => e.severity !== "INFO").forEach((e) => {
       toast(e.severity + " · " + (L.EVENT_LABELS[e.type] || e.type) + ": " + e.description, e.severity === "CRITICAL" ? "crit" : "warn");
       if (App.settings.notifications && "Notification" in window && Notification.permission === "granted") {
@@ -5937,6 +6045,10 @@
         Date.now() - (App.cam.lastTry || 0) > 30000) startCameras();
     // En reposo: se enciende si la persona abre Cámara o Calibrar.
     if (App.cam.status === "standby" && ["camara", "calibracion"].indexOf(App.view) >= 0) startCameras();
+    if (App.cam.status === "active" && App.cam.streams.some((e) => { const t = e.stream.getVideoTracks()[0]; return !t || t.readyState !== "live"; }) && Date.now() - (App.cam.lastTry || 0) > 30000) {
+      logProblem("cámara", "La imagen de la cámara se cortó; se reabre sola");
+      startCameras();
+    }
     if (App.running && !App.busy && Date.now() >= App.nextAt) runCycle("timer");
     renderHeader();
   }
@@ -5987,8 +6099,61 @@
     if (App.settings.frameSource === "simulation") out.push('<div class="banner info">' + ico("info", 20) + '<span><b>Modo simulación.</b> Los valores son de prueba y quedan marcados como «simulación». Cámbialo en <b>Ajustes → Lecturas y cámara</b>.</span></div>');
     else if (await App.store.hasSimulated()) out.push('<div class="banner info">' + ico("info", 20) + '<span>Hay datos de prueba (simulación) guardados junto con los reales. Están marcados y puedes borrarlos en <b>Ajustes → Avanzado</b>.</span></div>');
     if (!window.isSecureContext) out.push('<div class="banner warn">Esta página no está en un origen seguro: Chrome no permitirá la cámara. Ábrela como extensión, en http://localhost o por https.</div>');
+    if (App.settings.frameSource === "camera" && App.cam.needsPermission) out.push('<div class="banner crit">' + ico("crit", 20) + '<span><b>La lectura está detenida: falta el permiso de la cámara.</b> Toca el botón y en el aviso de Chrome elige <b>«Permitir»</b> (no «Permitir esta vez», que caduca).</span><button class="btn primary" type="button" data-banner="camperm">Activar cámara</button></div>');
+    const dir = await getSaveDir();
+    if (!dir.handle && !App.backupDirOk) out.push('<div class="banner warn">' + ico("warn", 20) + '<span><b>¿Dónde guardo los reportes diarios?</b> Elige una carpeta de este computador (p. ej. Documentos) y cada día se guardarán solos el Excel, el reporte y la copia de los datos.</span><button class="btn primary" type="button" data-banner="savedir">Elegir carpeta</button></div>');
+    else if (dir.handle && dir.perm !== "granted") out.push('<div class="banner warn">' + ico("warn", 20) + '<span>Para seguir guardando los reportes en <b>' + esc(dir.handle.name) + '</b>, Chrome pide confirmar el permiso (elige «Permitir en cada visita»).</span><button class="btn primary" type="button" data-banner="saveperm">Permitir guardar</button></div>');
     if (App.running && App.settings.frameSource === "camera") out.push('<div class="banner muted">Mantén esta ventana abierta y el equipo encendido: si se cierra, se suspende o se apaga, las lecturas se detienen y se registrará un periodo sin datos.</div>');
     $("#banners").innerHTML = out.join("");
+    $$("#banners [data-banner]").forEach((b) => b.addEventListener("click", async () => {
+      const k = b.dataset.banner;
+      if (k === "camperm") { await startCameras(); if (App.cam.status === "active") toast("Cámara activa: la lectura continúa."); }
+      if (k === "savedir") await chooseSaveDir();
+      if (k === "saveperm") { const d = await getSaveDir(); try { await d.handle.requestPermission({ mode: "readwrite" }); } catch (e) { /* cancelado */ } autoBackupCheck(); }
+      renderBanners();
+    }));
+  }
+
+  // ─────────────────────────── carpeta local (File System Access) ───────────────────────────
+
+  /** Carpeta elegida por la persona para los reportes diarios (el permiso lo guarda Chrome). */
+  async function getSaveDir() {
+    const handle = App.store ? await App.store.getKV("saveDir") : null;
+    if (!handle || !handle.queryPermission) return { handle: null, perm: null };
+    let perm = "prompt";
+    try { perm = await handle.queryPermission({ mode: "readwrite" }); } catch (e) { /* sin permiso */ }
+    return { handle, perm };
+  }
+  async function chooseSaveDir() {
+    if (!window.showDirectoryPicker) { toast("Este navegador no deja elegir carpetas: usa Chrome actualizado (o el servicio local).", "warn"); return null; }
+    try {
+      const h = await window.showDirectoryPicker({ id: "bioteva-reportes", mode: "readwrite", startIn: "documents" });
+      await App.store.setKV("saveDir", h);
+      toast("Listo: los reportes diarios se guardarán en «" + h.name + "». Se guarda una copia ahora.");
+      autoBackupCheck("primera");
+      return h;
+    } catch (e) { if (e && e.name !== "AbortError") toast("No se pudo usar esa carpeta: " + e.message, "warn"); return null; }
+  }
+  /** Escribe archivos en la carpeta elegida y deja solo las copias más recientes de cada tipo. */
+  async function writeToSaveDir(files) {
+    const d = await getSaveDir();
+    if (!d.handle) throw new Error("no hay carpeta elegida");
+    if (d.perm !== "granted") {
+      let p = "denied";
+      if (Date.now() - (App.gestureAt || 0) < 8000) { try { p = await d.handle.requestPermission({ mode: "readwrite" }); } catch (e) { /* cancelado */ } }
+      if (p !== "granted") throw new Error("Chrome pide confirmar el permiso de la carpeta (toca «Permitir guardar» en Inicio)");
+    }
+    for (const f of files) {
+      const fh = await d.handle.getFileHandle(f.name, { create: true });
+      const w = await fh.createWritable();
+      if (f.text != null) await w.write(f.text);
+      else { const bin = atob(f.base64), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); await w.write(u8); }
+      await w.close();
+    }
+    const keep = { json: 7, xlsx: 30, html: 60 }, names = [];
+    for await (const [name, h] of d.handle.entries()) if (h.kind === "file" && name.startsWith("bioteva-monitor_")) names.push(name);
+    for (const ext of Object.keys(keep)) names.filter((n) => n.endsWith("." + ext)).sort().reverse().slice(keep[ext]).forEach((n) => d.handle.removeEntry(n).catch(() => {}));
+    return d.handle.name;
   }
 
   // ─────────────────────────── navegación ───────────────────────────
@@ -6202,8 +6367,9 @@
     const gFrom = Math.min(dayStart, now - 6 * HOUR);
     const gRows = gFrom < dayStart ? (await App.store.readingsRange(gFrom, now)).sort((a, b) => a.ts - b.ts) : today;
     const gGap = Math.max(3 * S.intervalSec * 1000, 5 * 60000);
-    const ser = (sid, k) => L.series(gRows, sid, k, gFrom, now, 400).map((p) => ({ t: p.t, v: p.v }));
-    const chartsHtml = '<div class="panel home-charts"><header><h2>Gráficas · ' + (gFrom < dayStart ? "últimas 6 horas" : "hoy") + '</h2><div class="spacer"></div><a class="btn ghost small" href="#graficas" data-go="graficas">Más periodos →</a></header><div class="panel-body home-charts-grid">' +
+    const stepMs = (S.chartStepMin || 5) * 60000;
+    const ser = (sid, k) => L.series(gRows, sid, k, gFrom, now, Math.max(2, Math.ceil((now - gFrom) / stepMs))).map((p) => ({ t: p.t, v: p.v }));
+    const chartsHtml = '<div class="panel home-charts"><header><h2>Gráficas · ' + (gFrom < dayStart ? "últimas 6 horas" : "hoy") + '</h2><div class="spacer"></div><label class="f inline step-sel"><span>Un punto cada</span><select id="chartStep">' + L.CHART_STEPS.map((m) => '<option value="' + m + '"' + (m === (S.chartStepMin || 5) ? " selected" : "") + ">" + (m >= 60 ? m / 60 + " h" : m + " min") + "</option>").join("") + '</select></label><a class="btn ghost small" href="#graficas" data-go="graficas">Más periodos →</a></header><div class="panel-body home-charts-grid">' +
       App.sensors.filter((s) => s.enabled).map((s) => {
         const ck = L.controlKey(s), oth = ck === "tempOut" ? "tempIn" : "tempOut", lab = (k) => (k === "tempOut" ? "OUT · sonda (caja)" : "IN · aparato (cuarto)");
         return '<div class="col"><h3 class="hc-title">' + esc(s.name) + "</h3>" +
@@ -6269,6 +6435,8 @@
       "</div>" + lastRecordsHtml(recent3h.length >= 12 ? recent3h : today.length >= 12 ? today : await App.store.readingsRange(now - 2 * DAY, now));
 
     renderCamPicker();
+    const cs = $("#chartStep", host);
+    if (cs) cs.addEventListener("change", async () => { await saveSettings({ chartStepMin: Number(cs.value) }); renderDashboard(); });
     requestAnimationFrame(() => { host.style.minHeight = ""; if (Math.abs(window.scrollY - keepY) > 2) window.scrollTo(0, keepY); });
     $$("[data-caja]", host).forEach((b) => b.addEventListener("click", () => { App.caja.sensor = b.dataset.caja; App.caja.period = "today"; showView("caja"); }));
     $$("[data-act]", host).forEach((btn) => btn.addEventListener("click", () => {
@@ -6386,6 +6554,67 @@
   }
 
   // ─────────────────────────── CÁMARA (vista) ───────────────────────────
+
+  // ─────── enfoque y zoom de la cámara (si la cámara lo permite; muchas webcams USB sí) ───────
+  const tuneKey = (track) => (track && track.label ? track.label : "default");
+  async function applyTune(track) {
+    const t = (App.settings.camTune || {})[tuneKey(track)];
+    if (!t || !track.getCapabilities) return;
+    const caps = track.getCapabilities(), adv = {};
+    if (t.focusMode && caps.focusMode && caps.focusMode.indexOf(t.focusMode) >= 0) adv.focusMode = t.focusMode;
+    if (t.focusMode === "manual" && t.focusDistance != null && caps.focusDistance) adv.focusDistance = t.focusDistance;
+    if (t.zoom != null && caps.zoom) adv.zoom = t.zoom;
+    if (t.sharpness != null && caps.sharpness) adv.sharpness = t.sharpness;
+    if (Object.keys(adv).length) { try { await track.applyConstraints({ advanced: [adv] }); } catch (e) { logProblem("cámara", "No se pudo aplicar enfoque/zoom: " + e.message); } }
+  }
+  /** Nitidez de la imagen actual (varianza del laplaciano en el centro): sube cuando está bien enfocada. */
+  function sharpnessNow() {
+    const fr = grabFrame(App.sensors.find((s) => s.enabled) || App.sensors[0], {}, Date.now(), false);
+    if (!fr || !fr.gray) return null;
+    const g = fr.gray, W = g.w, H = g.h, x0 = Math.floor(W * 0.2), x1 = Math.floor(W * 0.8), y0 = Math.floor(H * 0.2), y1 = Math.floor(H * 0.8);
+    let s = 0, s2 = 0, n = 0;
+    for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) {
+      const i = y * W + x, l = 4 * g.d[i] - g.d[i - 1] - g.d[i + 1] - g.d[i - W] - g.d[i + W];
+      s += l; s2 += l * l; n++;
+    }
+    return n ? Math.round(s2 / n - (s / n) * (s / n)) : null;
+  }
+  /** Controles de enfoque/zoom en Ajustes → Cámara (solo los que la cámara ofrece). */
+  function renderCamTune() {
+    const host = document.getElementById("camTune");
+    const e = App.cam.streams[0];
+    if (!host) return;
+    const track = e && e.stream.getVideoTracks()[0];
+    const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+    if (!track || (!caps.focusMode && !caps.focusDistance && !caps.zoom)) {
+      host.hidden = !track;
+      host.innerHTML = track ? '<p class="hint">Esta cámara no permite controlar enfoque ni zoom desde Chrome. Para leer mejor: acércala a los sensores (deben ocupar al menos la mitad del ancho de la imagen) y usa la resolución más alta.</p>' : "";
+      return;
+    }
+    const cur = track.getSettings(), t = Object.assign({}, (App.settings.camTune || {})[tuneKey(track)] || {});
+    const rng = (id, c, v, label) => '<label class="f"><span>' + label + ' <b id="' + id + 'V">' + (v == null ? "" : Math.round(v * 100) / 100) + '</b></span><input type="range" id="' + id + '" min="' + c.min + '" max="' + c.max + '" step="' + (c.step || (c.max - c.min) / 100) + '" value="' + (v == null ? c.min : v) + '"></label>';
+    host.hidden = false;
+    host.innerHTML = "<h3 class=\"sub-h\">Enfoque y zoom</h3>" +
+      (caps.focusMode ? '<div class="segbtn" role="group" aria-label="Enfoque">' + caps.focusMode.filter((m) => m === "continuous" || m === "manual" || m === "single-shot").map((m) => '<button type="button" data-fm="' + m + '" aria-pressed="' + ((t.focusMode || cur.focusMode) === m) + '">' + ({ continuous: "Automático", manual: "Manual (fijo)", "single-shot": "Enfocar una vez" })[m] + "</button>").join("") + "</div>" : "") +
+      (caps.focusDistance ? rng("tuFocus", caps.focusDistance, t.focusDistance != null ? t.focusDistance : cur.focusDistance, "Distancia de enfoque") : "") +
+      (caps.zoom ? rng("tuZoom", caps.zoom, t.zoom != null ? t.zoom : cur.zoom, "Zoom de la cámara") : "") +
+      '<p class="hint">Si la imagen sale desenfocada a ratos, elige <b>Manual (fijo)</b> y mueve la distancia hasta que la <b>nitidez</b> sea la más alta: así la cámara no vuelve a desenfocarse sola. El zoom de la cámara acerca sin perder resolución; después recalibra los sensores. Nitidez ahora: <b id="tuSharp">–</b></p>';
+    const save = async (patch) => {
+      const all = Object.assign({}, App.settings.camTune || {});
+      all[tuneKey(track)] = Object.assign({}, all[tuneKey(track)] || {}, patch);
+      await saveSettings({ camTune: all });
+      await applyTune(track);
+      setTimeout(() => { const v = sharpnessNow(); const el = $("#tuSharp"); if (el) el.textContent = v == null ? "–" : v; }, 700);
+    };
+    $$("[data-fm]", host).forEach((b) => b.addEventListener("click", async () => { await save({ focusMode: b.dataset.fm }); renderCamTune(); }));
+    [["tuFocus", "focusDistance"], ["tuZoom", "zoom"]].forEach(([id, key]) => {
+      const el = $("#" + id);
+      if (!el) return;
+      el.addEventListener("input", () => { $("#" + id + "V").textContent = Math.round(Number(el.value) * 100) / 100; });
+      el.addEventListener("change", () => save(key === "focusDistance" ? { focusMode: "manual", focusDistance: Number(el.value) } : { zoom: Number(el.value) }));
+    });
+    const v = sharpnessNow(); $("#tuSharp").textContent = v == null ? "–" : v;
+  }
 
   /** La persona elige la cámara (Ajustes o la barra de Inicio): se guarda id + nombre y se abre ya. */
   async function chooseCamera(id) {
@@ -7610,6 +7839,9 @@
           (lastPc ? "Última: " + esc(fmtWhen(lastPc.ts)) + " · " + esc(String(lastPc.readings)) + " lecturas" + (lastPc.dir ? " · " + esc(lastPc.dir) : "") : "Aún no hay copias en el computador.") +
           (App.backupError ? ' · <span class="crit-text">Último intento falló: ' + esc(App.backupError) + ".</span>" : "") + "</span></div>" +
           '<button class="btn primary" type="button" id="dPcBk">Guardar copia ahora</button></div>' +
+        '<div class="conn-row"><div><b>Carpeta de reportes en este computador</b><span class="muted-text" id="dDirTxt">…</span></div><button class="btn" type="button" id="dDir">Elegir carpeta</button></div>' +
+        '<div class="conn-row"><div><b>Resumen de problemas</b><span class="muted-text">Errores y fallas de los últimos días agrupados, con cuántas veces pasaron y qué hacer. Para revisar y corregir.</span></div>' +
+          '<select id="dProbDays" aria-label="Días"><option value="1">1 día</option><option value="7" selected>7 días</option><option value="30">30 días</option></select><button class="btn" type="button" id="dProb">Descargar resumen</button></div>' +
         '<div class="conn-row"><div><b>Reporte del día (HTML)</b><span class="muted-text">Gráficas, tabla por hora, cifras explicadas y hallazgos. Se guarda solo cada día en la carpeta de respaldos; aquí lo descargas cuando quieras.</span></div>' +
           '<select id="dRepDay" aria-label="Día del reporte"><option value="0">Hoy</option><option value="1">Ayer</option><option value="2">Hace 2 días</option></select><button class="btn" type="button" id="dRep">Descargar reporte</button></div>' +
         (vh.length ? '<div class="conn-row"><div><b>Historial de versiones</b><span class="muted-text">' + vh.map((x) => esc(x.v) + " el " + esc(fmtWhen(x.ts)) + " (" + esc(String(x.readings)) + " lecturas guardadas)").join(" · ") + "</span></div></div>" : "") +
@@ -7652,6 +7884,9 @@
     });
     renderAlertsPanel();
     renderEnergyPanel();
+    getSaveDir().then((d) => { const t = $("#dDirTxt"); if (t) t.textContent = d.handle ? "«" + d.handle.name + "»" + (d.perm === "granted" ? " · guardando cada día" : " · falta confirmar el permiso (toca «Elegir carpeta»)") : "Sin elegir: elige dónde guardar el Excel, el reporte y la copia de cada día."; });
+    $("#dDir").addEventListener("click", async () => { await chooseSaveDir(); renderDatos(); renderBanners(); });
+    $("#dProb").addEventListener("click", async () => { const n = Number($("#dProbDays").value); download(new Blob([await buildProblemsHtml(n)], { type: "text/html" }), "bioteva-problemas_" + stamp() + ".html"); });
     $("#dPcBk").addEventListener("click", async (ev) => {
       ev.target.disabled = true;
       try { const i = await saveBackupToPc("manual"); toast("Copia guardada en " + (i.dir || "el computador") + " (" + i.files.length + " archivos)."); }
@@ -7783,7 +8018,10 @@
           '<label class="f"><span>Noche desde</span><input name="nightFrom" type="time" value="' + esc(S.nightFrom) + '"></label>' +
           '<label class="f"><span>Noche hasta</span><input name="nightTo" type="time" value="' + esc(S.nightTo) + '"></label>' +
         "</div>" +
-        '<label class="f inline"><input type="checkbox" name="energySaver"' + (S.energySaver ? " checked" : "") + '> <span><b>Ahorro de energía:</b> con lecturas cada 5 min o más, la cámara se apaga entre lecturas y se enciende sola unos segundos antes de cada una.</span></label>' +
+        '<div class="grid-form"><label class="f"><span>Guardar una lectura cada (si nada cambia)</span><select name="storeEverySec">' + L.STORE_OPTIONS.map((v) => '<option value="' + v + '"' + (v === S.storeEverySec ? " selected" : "") + ">" + esc(intervalLabel(v)) + "</option>").join("") + "</select></label>" +
+          '<label class="f"><span>Gráficas: un punto cada</span><select name="chartStepMin">' + L.CHART_STEPS.map((m) => '<option value="' + m + '"' + (m === S.chartStepMin ? " selected" : "") + ">" + (m >= 60 ? m / 60 + " hora" : m + " min") + "</option>").join("") + "</select></label></div>" +
+        '<p class="hint">Lectura continua: la cámara lee cada pocos segundos y detecta cambios bruscos al instante; para no llenar el disco se guarda una lectura por intervalo cuando nada cambia, y SIEMPRE se guardan los cambios y las alertas.</p>' +
+        '<label class="f inline"><input type="checkbox" name="energySaver"' + (S.energySaver ? " checked" : "") + '> <span><b>Ahorro de energía:</b> con lecturas cada 30 min o más, la cámara se apaga entre lecturas (no en la extensión: allí la cámara queda siempre encendida para no volver a pedir permiso).</span></label>' +
         '<label class="f inline"><input type="checkbox" name="sound"' + (S.sound ? " checked" : "") + '> <span><b>Sonido de alerta</b> en la app (alertas críticas y sensores sin lectura confiable).</span></label>' +
         '<p class="hint">La pantalla del computador puede apagarse: la app sigue leyendo. Lo que <b>no</b> debe pasar es que el computador se suspenda o se apague (ver «Configurar energía» en el paquete de instalación). Si la app se detiene, el servicio local lo detecta, la reabre y avisa (Datos y conexiones → Alertas).</p>' +
         '<h3 class="sub-h">Confianza del OCR</h3><div class="grid-form">' +
@@ -7926,11 +8164,16 @@
     App.migrateSchedule = !saved || (saved.cfgV || 0) < 5;
     if (App.migrateSchedule) {
       saved = saved || {};
-      Object.assign(saved, { intervalSec: 3600, nightIntervalSec: 600, nightFrom: "18:00", nightTo: "06:00", energySaver: true, sound: true, snapshotRetentionDays: Math.min(saved.snapshotRetentionDays || 7, 7) });
+      Object.assign(saved, { intervalSec: 10, nightIntervalSec: 0, nightFrom: "18:00", nightTo: "06:00", energySaver: false, sound: true, storeEverySec: 60, chartStepMin: 5, snapshotRetentionDays: Math.min(saved.snapshotRetentionDays || 7, 7) });
     }
-    if (saved) saved.cfgV = 5;
+    App.migrateContinuous = !!saved && (saved.cfgV || 0) < 6;
+    if (App.migrateContinuous) Object.assign(saved, { intervalSec: 10, nightIntervalSec: 0, energySaver: false, storeEverySec: 60, chartStepMin: 5 });
+    if (saved) saved.cfgV = 6;
     App.settings = L.validateSettings(saved || {}).value;
-    if (App.migrateSchedule) { await App.store.setKV("settings", App.settings); setTimeout(() => toast("Nuevo horario: de día una lectura cada hora y de noche (18:00–06:00) cada 10 minutos, con la cámara apagada entre lecturas. Se cambia en Ajustes → Lectura y alertas."), 2500); }
+    if (App.migrateSchedule || App.migrateContinuous) { await App.store.setKV("settings", App.settings); setTimeout(() => toast("Lectura continua: la cámara lee cada 10 s y queda encendida; se guarda una lectura por minuto (y siempre los cambios y alertas); gráficas con un punto cada 5 min. Se cambia en Ajustes → Lectura y alertas."), 2500); }
+    App.problems = (await App.store.getKV("problems")) || [];
+    window.addEventListener("error", (e) => logProblem("programa", (e.message || "Error") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : "")));
+    window.addEventListener("unhandledrejection", (e) => logProblem("programa", "Promesa sin manejar: " + (e.reason && e.reason.message ? e.reason.message : e.reason)));
     const sensors = await App.store.getKV("sensors");
     if (Array.isArray(sensors) && sensors.length) {
       App.sensors = ["A", "B"].map((id) => {
@@ -7971,7 +8214,12 @@
     try {
       // Un Worker no sufre el estrangulamiento de temporizadores de las pestañas en segundo plano.
       const w = new Worker("js/ticker.js");
-      w.onmessage = tick;
+      App.ticker = w;
+      w.onmessage = (e) => {
+        const d = e.data;
+        if (d && d.wake != null) { const r = App.sleeps[d.wake]; delete App.sleeps[d.wake]; if (r) r(); return; }
+        tick();
+      };
       w.onerror = () => setInterval(tick, 1000);
     } catch (e) {
       setInterval(tick, 1000);
@@ -7993,6 +8241,7 @@
     try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { /* opcional */ }
     $$(".app-ver").forEach((el) => { el.textContent = APP_VERSION; el.title = "Versión " + APP_VERSION + " · " + APP_DATE; });
     await checkVersion();
+    { const lp = await App.store.getKV("lastPcBackup"); App.backupDirOk = !!(lp && Date.now() - lp.ts < 2 * DAY); }
     setTimeout(() => autoBackupCheck(), 60000);
     setInterval(() => autoBackupCheck(), 30 * 60000);
 

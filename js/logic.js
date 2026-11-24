@@ -53,7 +53,11 @@
   };
   var CHANGE_TYPES = ["TEMPERATURE_INCREASE", "TEMPERATURE_DECREASE", "HUMIDITY_INCREASE", "HUMIDITY_DECREASE"];
 
-  var INTERVAL_OPTIONS = [30, 60, 120, 300, 600, 900, 1800, 3600];
+  var INTERVAL_OPTIONS = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+  /** Cada cuánto se GUARDA una lectura cuando nada cambia (se lee más seguido; los cambios y alertas se guardan siempre). */
+  var STORE_OPTIONS = [10, 30, 60, 120, 300];
+  /** Paso de las gráficas (minutos): cada punto es el promedio de ese intervalo. */
+  var CHART_STEPS = [1, 5, 10, 30, 60];
 
   /** Parámetros de DETECCIÓN (no son límites biológicos). */
   var DEFAULT_SETTINGS = {
@@ -89,6 +93,8 @@
     energySaver: true, // apaga la cámara entre lecturas cuando el intervalo es de 5 min o más
     sound: true,       // sonido en la app ante alertas
     darkLevel: 30,     // brillo medio de la pantalla del sensor (0–255) por debajo del cual «no hay luz»
+    storeEverySec: 60, // lectura continua: guarda una lectura por minuto si nada cambia
+    chartStepMin: 5,   // gráficas: un punto cada 5 min
   };
 
   var NUMERIC_RULES = {
@@ -133,6 +139,8 @@
     s.energySaver = !!s.energySaver;
     s.sound = !!s.sound;
     s.nightIntervalSec = Number(s.nightIntervalSec) || 0;
+    s.storeEverySec = STORE_OPTIONS.indexOf(Number(s.storeEverySec)) >= 0 ? Number(s.storeEverySec) : 60;
+    s.chartStepMin = CHART_STEPS.indexOf(Number(s.chartStepMin)) >= 0 ? Number(s.chartStepMin) : 5;
     if (s.nightIntervalSec && INTERVAL_OPTIONS.indexOf(s.nightIntervalSec) < 0) errors.push("nightIntervalSec: valor no permitido");
     if (!/^\d{1,2}:\d{2}$/.test(s.nightFrom || "") || !/^\d{1,2}:\d{2}$/.test(s.nightTo || "")) errors.push("La franja de noche va como HH:MM");
     return { ok: errors.length === 0, value: s, errors: errors };
@@ -528,7 +536,7 @@
 
     // ---- periodo sin datos ----
     if (prevAny && now - prevAny.ts > (S.noDataCycles + 0.5) * Math.max(intervalAt(S, prevAny.ts), intervalAt(S, now)) * 1000) {
-      emit("DATA_GAP", "WARNING", null, round1((now - prevAny.ts) / 60000), null, null,
+      emit("DATA_GAP", now - prevAny.ts >= 15 * 60000 ? "WARNING" : "INFO", null, round1((now - prevAny.ts) / 60000), null, null,
         "Sin lecturas de " + name + " entre " + fmtTime(prevAny.ts) + " y " + fmtTime(now) + " (" + fmtDuration(now - prevAny.ts) + "). Posible interrupción del monitoreo (equipo apagado, suspendido o navegador cerrado). Se requiere verificación.");
     }
 
@@ -1405,6 +1413,8 @@
 
   root.MonLogic = {
     intervalAt: intervalAt,
+    STORE_OPTIONS: STORE_OPTIONS,
+    CHART_STEPS: CHART_STEPS,
     analyzePeriod: analyzePeriod,
     maxIntervalSec: maxIntervalSec,
     inWindowHM: inWindowHM,

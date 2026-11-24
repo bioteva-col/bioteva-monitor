@@ -14,7 +14,7 @@
 
 <header class="top">
   <div class="wrap topbar">
-    <a class="brand" href="#dashboard" data-nav="dashboard"><b>BioTeva</b><span>Monitor</span><small class="app-ver ver-badge">v21</small></a>
+    <a class="brand" href="#dashboard" data-nav="dashboard"><b>BioTeva</b><span>Monitor</span><small class="app-ver ver-badge">v22</small></a>
     <div class="spacer"></div>
     <span class="status-pill" id="statusPill" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="statusText">Detenido</span></span>
     <div class="top-actions">
@@ -92,6 +92,7 @@
             <button class="btn ghost" id="camRefresh" type="button">Buscar cámaras</button>
           </div>
           <p class="msg" id="camMsg" role="status"></p>
+          <div id="camTune" class="cam-tune" hidden></div>
           <p class="hint">La cámara solo se enciende cuando pulsas <b>Activar cámara</b>; Chrome pedirá permiso la primera vez. El video nunca sale de este equipo: cada ciclo toma un fotograma, lo analiza aquí y guarda solo los números.</p>
         </div>
 
@@ -658,7 +659,7 @@ docker compose -f docker-compose.full.yml up -d</pre><p class="muted-text">Qué 
 <footer class="foot">
   <div class="wrap">
     BioTeva Monitor · Procesamiento 100 % local (cámara → OCR → base en este navegador). No se envían imágenes ni datos a internet.
-    · Versión <span class="app-ver">v21</span>
+    · Versión <span class="app-ver">v22</span>
     <span id="footMode"></span>
   </div>
 </footer>
