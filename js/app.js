@@ -27,7 +27,7 @@
     still: null,
     sim: { simulator: L.createSimulator(Date.now() % 100000), anomalies: {}, frame: null, frameAt: 0 },
     cal: { sensorId: "A", frozen: null, draft: null, field: "tempIn", drag: null, lastFrame: null, lastRect: null, candidates: null, candidatesAt: 0 },
-    track: { state: {}, lastPersist: 0, lastPreview: 0, tplRefreshed: {} },
+    track: { state: {}, lastRealign: {}, lastPersist: 0, lastPreview: 0, tplRefreshed: {} },
     lastPurge: 0,
     wakeLock: null,
     installPrompt: null,
@@ -113,7 +113,7 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   }
   // Versión de la app (cámbiala junto con VERSION de sw.js al publicar).
-  const APP_VERSION = "v23", APP_DATE = "24-nov-2026";
+  const APP_VERSION = "v24", APP_DATE = "26-nov-2026";
   const BACKUP_URL = "http://127.0.0.1:4479/api/backup";
   const u8ToB64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   /**
@@ -257,6 +257,47 @@
       "<h2>Fallas de la app (cámara, guardado, programa)</h2>" + (probs.length ? "<table><thead><tr><th>Tipo</th><th>Mensaje</th><th>Veces</th><th>Desde</th><th>Hasta</th></tr></thead><tbody>" +
         probs.map((p) => "<tr><td>" + e(p.kind) + "</td><td>" + e(p.message) + "</td><td>" + p.count + "</td><td>" + e(L.fmtDateTime(p.ts)) + "</td><td>" + e(L.fmtDateTime(p.lastTs)) + "</td></tr>").join("") + "</tbody></table>" : "<p>Sin fallas registradas.</p>") +
       "</body></html>";
+  }
+
+  /** Resumen de un día en texto corto (para Telegram / correo): cifras por caja y hallazgos principales. */
+  async function dailySummaryText(dayKeyStr) {
+    const b = L.dayBounds(dayKeyStr), S = App.settings;
+    const rows = (await App.store.readingsRange(b.from, b.to)).filter((r) => r.source !== "simulation");
+    const ana = L.analyzePeriod(rows, App.sensors, S, b.from, b.to);
+    const f = (v, d) => (v == null || !isFinite(v) ? "–" : fmt(v, d == null ? 1 : d));
+    const lines = ["Día " + dayKeyStr + " · " + rows.length + " lecturas guardadas"];
+    ana.forEach((a) => {
+      lines.push("", "🧺 " + a.sensorName + ": " + (a.reliablePct == null ? 0 : Math.round(a.reliablePct)) + " % de lecturas confiables",
+        "   OUT " + f(a.stats.tempOut.min) + "–" + f(a.stats.tempOut.max) + " °C (prom. " + f(a.stats.tempOut.mean) + ")" + " · IN prom. " + f(a.stats.tempIn.mean) + " °C · HR " + f(a.stats.humidity.min, 0) + "–" + f(a.stats.humidity.max, 0) + " %",
+        "   " + (a.outOfRange ? "⚠️ " + a.outOfRange + " lecturas fuera de tus límites" : "Dentro de tus límites") + (a.tempMin != null ? " (" + f(a.tempMin) + "–" + f(a.tempMax) + " °C)" : ""));
+      a.findings.filter((x) => x.level === "crit" || x.level === "warn").slice(0, 3).forEach((x) => lines.push("   • " + x.text));
+    });
+    const pend = await pendingInputs();
+    if (pend.length) lines.push("", "📝 Requiere tu atención:", ...pend.map((p) => "• " + p.title));
+    lines.push("", "Reporte completo con gráficas: carpeta de reportes del computador.");
+    return lines.join("\n");
+  }
+  /** Envía al servicio local (que lo reenvía por Telegram/correo). Silencioso si el servicio no está. */
+  function sendSummary(kind, key, text) {
+    const api = window.MonThermalUI && window.MonThermalUI.api;
+    if (!api) return Promise.resolve(null);
+    return api("POST", "/api/summary", { kind, key, text }).catch(() => null);
+  }
+  /** Una vez al día manda el resumen de AYER; cada 6 h (o si cambian) manda los pendientes. */
+  async function summaryCheck() {
+    try {
+      const y = L.dayKey(Date.now() - DAY), sent = await App.store.getKV("summarySent");
+      if (sent !== y && (await App.store.countReadings()) > 0) {
+        const r = await sendSummary("daily", y, await dailySummaryText(y));
+        if (r && (r.telegram === "enviado" || r.email === "enviado" || r.skipped)) await App.store.setKV("summarySent", y);
+      }
+      const pend = await pendingInputs();
+      const ids = pend.map((p) => p.id).sort().join(","), half = Math.floor(Date.now() / (6 * HOUR));
+      if (ids && (ids !== App.lastPendingIds || half !== App.lastPendingHalf)) {
+        App.lastPendingIds = ids; App.lastPendingHalf = half;
+        await sendSummary("pending", ids + "|" + half, pend.map((p) => "• " + p.title + "\n  " + p.text).join("\n"));
+      }
+    } catch (e) { logProblem("resumen", "No se pudo armar el resumen: " + e.message); }
   }
 
   /** Una copia al día (y al actualizar la versión). Si el servicio local no está, lo reintenta luego. */
@@ -531,12 +572,13 @@
 
   /** Rectifica, preprocesa y lee los campos de un sensor en un fotograma. */
   function analyzeSensor(sensor, gray, cal, updateThumb) {
+    const learnFn = App.learn && learnerFor(sensor.id);
     cal = cal || sensor.calibration;
     const q = quadPx(cal, gray.w, gray.h);
     // Lectura tolerante a una pequeña inclinación del sensor: los campos dudosos se releen girando el cuadro.
     const enabledFields = {};
     L.FIELD_KEYS.forEach((key) => { const f = cal.fields[key]; if (f && f.enabled) enabledFields[key] = f; });
-    const rd = Seg.readLcd(gray, q, enabledFields, { slantDeg: cal.slantDeg, lightSegments: cal.lightSegments });
+    const rd = Seg.readLcd(gray, q, enabledFields, { slantDeg: cal.slantDeg, lightSegments: cal.lightSegments, learnFor: learnFn ? (k) => (k === "time" ? null : learnFn()) : null });
     const lcd = rd.lcd;
     const size = lcd.size, raw = lcd.raw, clean = lcd.img;
     const fields = {}, details = {};
@@ -568,6 +610,122 @@
       details,
       thumb,
     };
+  }
+
+  // ─────────────────────────── aprendizaje de dígitos ───────────────────────────
+  //
+  // Base de datos local (IndexedDB, clave «digitLearn»): cada muestra es un dígito de un sensor con sus
+  // rasgos (tinta de los 7 segmentos + barra superior) y su etiqueta. Fuentes: lo que la persona ESCRIBE
+  // al calibrar (peso 3, la más confiable) y lecturas confiables del monitoreo (peso 0,5; 1 si fueron
+  // corregidas por contexto). Cuando la regla fija duda, deciden los vecinos más parecidos de ESE sensor.
+  const LEARN_MAX = 4000;
+  App.learn = { samples: [], knn: {}, used: 0, lastAuto: {} };
+  async function loadLearn() {
+    const d = await App.store.getKV("digitLearn");
+    App.learn.samples = d && Array.isArray(d.samples) ? d.samples : [];
+    App.learn.knn = {};
+  }
+  function saveLearnSoon() {
+    App.learn.knn = {};
+    clearTimeout(App.learn.saveT);
+    App.learn.saveT = setTimeout(() => App.store.setKV("digitLearn", { v: 1, samples: App.learn.samples }).catch(() => {}), 3000);
+  }
+  /** Clasificador del sensor (se reconstruye cuando cambian las muestras). */
+  function learnerFor(sensorId) {
+    if (!(sensorId in App.learn.knn)) App.learn.knn[sensorId] = Seg.makeKnn(App.learn.samples.filter((x) => x.s === sensorId));
+    const fn = App.learn.knn[sensorId];
+    return fn ? () => (x) => { const r = fn(x); return r; } : null;
+  }
+  /** Agrega las muestras de un campo leído: label = texto correcto (p. ej. "21.9"). */
+  function addLearnSamples(sensorId, key, detail, label, weight) {
+    if (!detail || !detail.digits || !detail.digits.length || label == null) return 0;
+    const n = detail.digits.length;
+    let chars = String(label).replace(/[.,:]/g, "").split("");
+    if (chars.length > n) return 0;
+    while (chars.length < n) chars.unshift(" ");
+    let added = 0;
+    detail.digits.forEach((d, i) => {
+      if (!d.feat) return;
+      App.learn.samples.push({ s: sensorId, f: key, ch: chars[i], x: d.feat, w: weight, ts: Date.now() });
+      added++;
+    });
+    if (App.learn.samples.length > LEARN_MAX) {
+      // se descartan primero las automáticas más viejas; lo que escribió la persona se conserva
+      const extra = App.learn.samples.length - LEARN_MAX;
+      let removed = 0;
+      App.learn.samples = App.learn.samples.filter((x) => (removed < extra && x.w < 3 ? (removed++, false) : true));
+      if (App.learn.samples.length > LEARN_MAX) App.learn.samples = App.learn.samples.slice(-LEARN_MAX);
+    }
+    if (added) saveLearnSoon();
+    return added;
+  }
+  /** Tras cada ciclo: aprende de las lecturas confiables (como mucho una muestra cada 5 min por campo, salvo correcciones). */
+  function learnFromReading(sensor, reading, details) {
+    if (!details || reading.source !== "camera") return;
+    ["tempIn", "tempOut", "humidity"].forEach((k) => {
+      const f = reading.fields && reading.fields[k], d = details[k];
+      if (!f || !d || f.value == null || !L.isReliable(f.level)) return;
+      if ((f.flags || []).some((x) => x === "INCOHERENT" || x === "IMPROBABLE_JUMP")) return;
+      const corrected = (f.flags || []).indexOf("OCR_CORRECTION") >= 0;
+      if (!corrected && f.level !== "HIGH") return;
+      const key = sensor.id + k;
+      if (!corrected && Date.now() - (App.learn.lastAuto[key] || 0) < 5 * 60000) return;
+      App.learn.lastAuto[key] = Date.now();
+      const label = k === "humidity" ? String(Math.round(f.value)) : Number(f.value).toFixed(1);
+      addLearnSamples(sensor.id, k, d, label, corrected ? 1 : 0.5);
+    });
+  }
+
+  /** Al calibrar: los valores que la persona escribió etiquetan los dígitos que se ven ahora (peso 3). */
+  function learnFromTyped(gray, cal) {
+    const t = App.cal.typedForLearn, s = t && sensorById(t.sensorId);
+    if (!t || !s || !gray) return;
+    const a = analyzeSensor(s, gray, cal, false);
+    let n = 0;
+    Object.keys(t.vals).forEach((k) => { n += addLearnSamples(s.id, k, a.details[k], k === "humidity" ? String(Math.round(t.vals[k])) : Number(t.vals[k]).toFixed(1), 3); });
+    if (n) toast("La app aprendió " + n + " dígitos de " + s.name + " con lo que escribiste.");
+    App.cal.typedForLearn = null;
+  }
+
+  // ─────────────────────────── reajuste por vibración ───────────────────────────
+
+  /** Cuántos valores de temperatura/humedad se leyeron con buena confianza y forma posible. */
+  function readableCount(cap) {
+    const f = (cap && cap.fields) || {};
+    return ["tempIn", "tempOut", "humidity"].filter((k) => f[k] && f[k].confidence >= 70 && plausibleRead(k, f[k].text)).length;
+  }
+  /**
+   * Si la cámara se movió un poco (vibración) y el sensor ya no se lee, busca la pantalla cerca de donde
+   * estaba (con su «foto de referencia») y SOLO acepta la nueva posición si allí se lee mejor. Así se
+   * reajusta sola sin saltar a otros objetos. Devuelve el análisis en la nueva posición o null.
+   */
+  function realign(sensor, gray, current) {
+    const cal = sensor.calibration;
+    if (readableCount(current) >= 2) {
+      // posición buena: guardar / renovar su foto de referencia para poder reubicarla después
+      if ((!cal.track || !cal.track.tpl) || Date.now() - (App.track.tplRefreshed[sensor.id] || 0) > 30 * 60000) {
+        try { cal.track = Object.assign({}, cal.track || {}, { tpl: Seg.makeTemplate(gray, pxQuad(cal.quad, gray.w, gray.h)) || (cal.track && cal.track.tpl) }); App.track.tplRefreshed[sensor.id] = Date.now(); App.realignDirty = true; } catch (e) { /* opcional */ }
+      }
+      return null;
+    }
+    if (!cal.track || !cal.track.tpl || Date.now() - (App.track.lastRealign[sensor.id] || 0) < 15000) return null;
+    App.track.lastRealign[sensor.id] = Date.now();
+    let r = null;
+    try { r = Seg.trackTemplate(gray, cal.track.tpl, pxQuad(cal.quad, gray.w, gray.h)); } catch (e) { r = null; }
+    if (!r || !r.quad) return null;
+    const q = normQuad(r.quad, gray.w, gray.h), old = cal.quad;
+    const moved = Math.hypot(q[0].x - old[0].x, q[0].y - old[0].y);
+    if (moved < 0.003 || moved > 0.25) return null; // no se movió, o «salto» demasiado grande para ser vibración
+    const trial = Object.assign({}, cal, { quad: q });
+    const a2 = analyzeSensor(sensor, gray, trial, false);
+    if (readableCount(a2.capture) >= Math.max(2, readableCount(current) + 1)) {
+      cal.quad = q;
+      App.realignDirty = true;
+      logProblem("reajuste", sensor.name + ": la cámara se movió (" + Math.round(moved * 1000) / 10 + " % de la imagen); se reubicó sola la pantalla");
+      toast(sensor.name + ": la cámara se movió un poco y se reajustó sola.");
+      return a2;
+    }
+    return null;
   }
 
   // ─────────────────────────── seguimiento de pantallas ───────────────────────────
@@ -721,8 +879,13 @@
         if (!fr || fr.error) capture = { captureStatus: "camera_error", fields: {}, error: (fr && fr.error) || "Sin imagen" };
         else {
           const ex = extra.get(sensor.id);
+          let a0 = analyzeSensor(sensor, fr.gray, null, true);
+          const moved = realign(sensor, fr.gray, a0.capture);
+          if (moved) a0 = moved;
           const more = ex.map((f) => analyzeSensor(sensor, f.gray, null, false).capture);
-          capture = analyzeSensor(sensor, fr.gray, null, true).capture;
+          capture = a0.capture;
+          App.lastDetails = App.lastDetails || {};
+          App.lastDetails[sensor.id] = a0.details;
           if (more.length) {
             const voted = voteCaptures(more.concat([capture]));
             // fotograma promedio: menos ruido de cámara → segmentos tenues más claros (medido: +30-60 % de valores leídos)
@@ -756,8 +919,10 @@
           (rd[ckey] != null && Math.abs(rd[ckey] - prevSaved[ckey]) >= 0.3) || (rd.humidity != null && prevSaved.humidity != null && Math.abs(rd.humidity - prevSaved.humidity) >= 3);
         if (keep) { await App.store.saveCycle([res.reading], res.events); App.lastSaved[sensor.id] = res.reading; }
         App.latest[sensor.id] = res.reading;
+        try { learnFromReading(sensor, res.reading, fr && !fr.error && App.lastDetails ? App.lastDetails[sensor.id] : null); } catch (e) { /* opcional */ }
         results.push(res);
       }
+      if (App.realignDirty) { App.realignDirty = false; saveSensors(); }
       App.lastCycleAt = now;
       await App.store.setKV("lastCycleAt", now);
       if (now - App.lastPurge > HOUR) {
@@ -2118,7 +2283,8 @@
       const typedVals = {};
       CMP_KEYS.forEach(([k, sel]) => { if (k === "time") return; const v = parseNum($(sel).value.trim()); if (v != null) typedVals[k] = k === "humidity" ? Math.round(v) : Math.round(v * 10) / 10; });
       if (Object.keys(typedVals).length) d.anchor = { ts: Date.now(), values: typedVals };
-      if (!typedAny.length) { persistDraft(); return setCalStep(3); }
+      App.cal.typedForLearn = Object.keys(typedVals).length ? { sensorId: App.cal.sensorId, vals: typedVals } : null;
+      if (!typedAny.length) { learnFromTyped(fr.gray, d); persistDraft(); return setCalStep(3); }
       msg.textContent = "Ajustando (unos segundos)…"; msg.className = "msg";
       $("#exFit").disabled = true;
       await new Promise((r) => setTimeout(r, 30));
@@ -2130,6 +2296,7 @@
         persistDraft();
         // la hora es opcional: si solo falla la hora, se sigue igual
         const bad = Object.keys(res.result).filter((k) => !res.result[k].ok && k !== "time");
+        learnFromTyped(fr.gray, d);
         if (!bad.length) { $("#calForce").hidden = true; toast("Listo: la app ya lee lo mismo que tú."); setCalStep(3); }
         else {
           msg.textContent = "Casi: todavía no lee bien " + bad.map((k) => L.FIELD_LABELS[k] + " (lee «" + (res.result[k].text || "nada") + "»)").join(", ") + ". Arrastra ese cuadro encima de su número, gira la pantalla o acerca la cámara, y vuelve a tocar «Ajustar y seguir».";
@@ -2669,7 +2836,8 @@
         '<label class="f"><span>Chat (número)</span><input id="alChat" inputmode="numeric" value="' + esc(String(tg.chatId || "")) + '" placeholder="se busca solo"></label>' +
       "</div>" +
       '<p class="hint">1) En Telegram abre @BotFather → /mybots → ' + esc(tg.bot || "Bioteva_ops_bot") + " → API Token y pégalo aquí. 2) Escríbele cualquier mensaje al bot (desde tu cuenta o agrega el bot a un grupo). 3) Toca «Buscar chat».</p>" +
-      '<div class="row-actions"><button class="btn primary" type="button" id="alSave">Guardar</button><button class="btn" type="button" id="alFind">Buscar chat</button><button class="btn" type="button" id="alTestTg">Probar Telegram</button><button class="btn" type="button" id="alTest">Probar correo y aviso</button></div>' +
+      '<p class="hint">Además de las alertas, por Telegram/correo llega <b>cada día un resumen</b> (cifras por caja y hallazgos) y, cada 6 h, <b>lo que requiere tu atención</b>. En Telegram puedes escribirle al bot <b>estado</b>, <b>resumen</b> o <b>pendientes</b> y te responde.</p>' +
+      '<div class="row-actions"><button class="btn primary" type="button" id="alSave">Guardar</button><button class="btn" type="button" id="alSum">Enviar resumen de hoy</button><button class="btn" type="button" id="alFind">Buscar chat</button><button class="btn" type="button" id="alTestTg">Probar Telegram</button><button class="btn" type="button" id="alTest">Probar correo y aviso</button></div>' +
       '<span class="msg" id="alMsg" role="status"></span>' +
       (a.log && a.log.length ? '<h3 class="sub-h">Últimas alertas</h3><ul class="plain">' + a.log.slice().reverse().slice(0, 8).map((x) => "<li>" + esc(fmtWhen(x.ts)) + " · <b>" + esc(x.title) + "</b>" + (x.email ? " · correo " + esc(x.email) : "") + (x.telegram ? " · Telegram " + esc(x.telegram) : "") + "</li>").join("") + "</ul>" : "") +
       (a.incident ? '<div class="banner crit">El vigilante detectó que el monitoreo se detuvo desde ' + esc(fmtWhen(a.incident.since)) + ".</div>" : "");
@@ -2689,8 +2857,47 @@
         msg("Varios chats: " + r.chats.map((c) => c.name + " = " + c.id).join(" · ") + ". Escribe el número que quieres y Guarda.", "warn");
       } catch (e) { msg(e.message, "crit"); }
     });
+    $("#alSum").addEventListener("click", async () => { try { await save(); const r = await sendSummary("daily", null, await dailySummaryText(L.dayKey(Date.now()))); msg(r ? "Resumen enviado (Telegram: " + (r.telegram || "no configurado") + " · correo: " + (r.email || "no configurado") + ")." : "El servicio local no responde.", r ? "good" : "crit"); } catch (e) { msg(e.message, "crit"); } });
     $("#alTestTg").addEventListener("click", async () => { try { await save(); const r = await api("POST", "/api/alerts/test", { channel: "telegram" }); msg(r.ok ? "Mensaje de prueba enviado a Telegram." : r.error, r.ok ? "good" : "crit"); } catch (e) { msg(e.message, "crit"); } });
     $("#alTest").addEventListener("click", async () => { try { await save(); const r = await api("POST", "/api/alerts/test", {}); msg(r.ok ? "Correo de prueba enviado a " + $("#alTo").value + " (y aviso en el computador)." : r.error, r.ok ? "good" : "crit"); } catch (e) { msg(e.message, "crit"); } });
+  }
+
+  // ─────────────────────────── APRENDIZAJE (panel) ───────────────────────────
+
+  function renderLearnPanel() {
+    const host = $("#learnPanel .panel-body");
+    if (!host) return;
+    const all = App.learn.samples;
+    const rows = App.sensors.map((s) => {
+      const mine = all.filter((x) => x.s === s.id), typed = mine.filter((x) => x.w >= 3).length;
+      const acc = mine.length >= 20 ? Seg.learnAccuracy(mine, 400) : null;
+      const per = "0123456789".split("").map((c) => c + ": " + mine.filter((x) => x.ch === c).length).join(" · ");
+      return "<tr><td>" + esc(s.name) + "</td><td>" + mine.length + "</td><td>" + typed + "</td><td>" + (acc ? acc.rule + " %" : "–") + "</td><td>" + (acc ? "<b>" + acc.learned + " %</b>" : "faltan muestras") + '</td><td class="muted-text">' + esc(per) + "</td></tr>";
+    }).join("");
+    host.innerHTML =
+      '<p class="hint">La app guarda en este computador una <b>base de datos de dígitos etiquetados</b> y la usa cuando la regla fija duda. Aprende sola de las lecturas confiables, pero lo que más le enseña es que <b>escribas los valores reales</b> en Calibrar → «Compara» (cada vez que veas una lectura dudosa: 3 o 4 veces al día los primeros días, a distintas horas y con distinta luz).</p>' +
+      '<div class="table-scroll"><table><thead><tr><th>Sensor</th><th>Muestras</th><th>Escritas por ti</th><th>Acierto solo con la regla</th><th>Acierto con aprendizaje</th><th>Muestras por dígito</th></tr></thead><tbody>' + rows + "</tbody></table></div>" +
+      '<p class="hint">El acierto se estima dejando cada muestra fuera y adivinándola con las demás (solo cuenta cuando hay al menos 20 muestras de ese sensor).</p>' +
+      '<div class="row-actions"><button class="btn primary" type="button" id="lnCal">Enseñar ahora (Calibrar → Compara)</button><button class="btn" type="button" id="lnExp">Exportar base (JSON)</button><label class="btn">Importar base<input type="file" id="lnImp" accept="application/json,.json" hidden></label><button class="btn ghost" type="button" id="lnDel">Borrar lo aprendido</button></div>';
+    $("#lnCal").addEventListener("click", () => showView("calibracion"));
+    $("#lnExp").addEventListener("click", () => download(new Blob([JSON.stringify({ app: "bioteva-monitor", kind: "digitLearn", v: 1, exportedAt: Date.now(), samples: App.learn.samples })], { type: "application/json" }), "bioteva-aprendizaje-digitos_" + stamp() + ".json"));
+    $("#lnImp").addEventListener("change", async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      try {
+        const d = JSON.parse(await f.text());
+        if (!d || d.kind !== "digitLearn" || !Array.isArray(d.samples)) throw new Error("no es una base de aprendizaje de BioTeva Monitor");
+        const ok = d.samples.filter((x) => x && typeof x.s === "string" && typeof x.ch === "string" && Array.isArray(x.x) && x.x.length >= 7 && x.x.every((v) => typeof v === "number"));
+        App.learn.samples = App.learn.samples.concat(ok).slice(-LEARN_MAX);
+        saveLearnSoon();
+        toast("Se importaron " + ok.length + " muestras.");
+        renderLearnPanel();
+      } catch (err) { toast("No se pudo importar: " + err.message, "warn"); }
+    });
+    $("#lnDel").addEventListener("click", () => {
+      if (!confirm("¿Borrar todas las muestras aprendidas? La lectura vuelve a usar solo la regla fija.")) return;
+      App.learn.samples = []; saveLearnSoon(); renderLearnPanel();
+    });
   }
 
   // ─────────────────────────── ENERGÍA (estimado) ───────────────────────────
@@ -2760,6 +2967,7 @@
         (vh.length ? '<div class="conn-row"><div><b>Historial de versiones</b><span class="muted-text">' + vh.map((x) => esc(x.v) + " el " + esc(fmtWhen(x.ts)) + " (" + esc(String(x.readings)) + " lecturas guardadas)").join(" · ") + "</span></div></div>" : "") +
       "</div></div>" +
       '<div class="panel" id="alertsPanel"><header><h2>Alertas: correo, Telegram y aviso si se detiene</h2></header><div class="panel-body col"><p class="muted-text">Consultando el servicio local…</p></div></div>' +
+      '<div class="panel" id="learnPanel"><header><h2>Aprendizaje de lectura de dígitos</h2></header><div class="panel-body col"></div></div>' +
       '<div class="panel" id="energyPanel"><header><h2>Consumo de energía (estimado)</h2></header><div class="panel-body col"></div></div>' +
       '<div class="panel"><header><h2>Llevar tus datos a otros sistemas</h2></header><div class="panel-body">' +
         '<div class="conn-row"><div><b>Excel</b><span class="muted-text">Lecturas, alertas y resumen por día, listo para abrir en Excel.</span></div>' +
@@ -2797,6 +3005,7 @@
     });
     renderAlertsPanel();
     renderEnergyPanel();
+    renderLearnPanel();
     getSaveDir().then((d) => { const t = $("#dDirTxt"); if (t) t.textContent = d.handle ? "«" + d.handle.name + "»" + (d.perm === "granted" ? " · guardando cada día" : " · falta confirmar el permiso (toca «Elegir carpeta»)") : "Sin elegir: elige dónde guardar el Excel, el reporte y la copia de cada día."; });
     $("#dDir").addEventListener("click", async () => { await chooseSaveDir(); renderDatos(); renderBanners(); });
     $("#dProb").addEventListener("click", async () => { const n = Number($("#dProbDays").value); download(new Blob([await buildProblemsHtml(n)], { type: "text/html" }), "bioteva-problemas_" + stamp() + ".html"); });
@@ -3093,6 +3302,7 @@
     }
     if (App.migrateSchedule || App.migrateContinuous) { await App.store.setKV("settings", App.settings); setTimeout(() => toast("Lectura continua: la cámara lee cada 10 s y queda encendida; se guarda una lectura por minuto (y siempre los cambios y alertas); gráficas con un punto cada 5 min. Se cambia en Ajustes → Lectura y alertas."), 2500); }
     App.problems = (await App.store.getKV("problems")) || [];
+    await loadLearn();
     window.addEventListener("error", (e) => logProblem("programa", (e.message || "Error") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : "")));
     window.addEventListener("unhandledrejection", (e) => logProblem("programa", "Promesa sin manejar: " + (e.reason && e.reason.message ? e.reason.message : e.reason)));
     const sensors = await App.store.getKV("sensors");
@@ -3165,6 +3375,8 @@
     { const lp = await App.store.getKV("lastPcBackup"); App.backupDirOk = !!(lp && Date.now() - lp.ts < 2 * DAY); }
     setTimeout(() => autoBackupCheck(), 60000);
     setInterval(() => autoBackupCheck(), 30 * 60000);
+    setTimeout(() => summaryCheck(), 90000);
+    setInterval(() => summaryCheck(), 30 * 60000);
 
     $$("#tabs .tab, #bottomNav button, #sideNav button").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
     $$("[data-nav]").forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); showView(a.dataset.nav); }));

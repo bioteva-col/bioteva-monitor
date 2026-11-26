@@ -523,12 +523,23 @@
       var best = ranked[0], second = ranked[1];
       var ch = best.ch, conf = Math.max(0, Math.min(1, second.d - best.d));
       if (best.d > 2.2) { ch = "?"; conf = 0; } // no se parece a ningún dígito
+      // Rasgos del dígito para el aprendizaje: tinta de los 7 segmentos (0–1) + cobertura de la barra de arriba.
+      var feat = z.concat([Math.round(topBarCoverage(img, roi, ci, digits, tanSlant, light, lo, contrast) * 100) / 100]);
+      var learned = false;
+      // Aprendizaje: si la regla duda, decide la votación entre los dígitos ya etiquetados de ESTE sensor
+      // (lo que la persona escribió al calibrar y lecturas confiables). Solo cifras, blanco a la izquierda o signo.
+      if (opts.learn && !opts.allow && (conf < 0.6 || ch === "?")) {
+        var kn = opts.learn(feat, ci);
+        var okCh = kn && (/\d/.test(kn.ch) || ((kn.ch === " " || kn.ch === "-") && !seenVisible));
+        if (okCh && kn.n >= 4 && kn.conf >= 0.7 && kn.ch !== ch) { ch = kn.ch; conf = Math.max(conf, Math.min(0.75, kn.conf)); learned = true; }
+        else if (okCh && kn.ch === ch && kn.conf >= 0.7) conf = Math.max(conf, Math.min(0.8, kn.conf)); // el aprendizaje confirma a la regla
+      }
       if (ch !== " ") seenVisible = true;
       // 2.ª opción si está cerca (1↔7 difieren en un solo segmento): sirve para corregir por contexto
       var alt = ranked.slice(1, 3).filter(function (r) { return r.d - best.d < 1.2 && /\d/.test(r.ch); }).map(function (r) { return r.ch; });
       // 1 ↔ 7: se decide midiendo cuánto del ANCHO cubre la barra de arriba (ver topBarCoverage).
-      if (ch === "1" || ch === "7") {
-        var cov = topBarCoverage(img, roi, ci, digits, tanSlant, light, lo, contrast);
+      if ((ch === "1" || ch === "7") && !learned) {
+        var cov = feat[7];
         if (ch === "7" && cov < 0.3) { ch = "1"; conf = Math.min(conf, 0.6); }
         else if (ch === "1" && cov > 0.6) { ch = "7"; conf = Math.min(conf, 0.6); }
         else if (cov >= 0.3 && cov <= 0.6) conf = Math.min(conf, 0.3); // barra a medias: dudoso
@@ -536,7 +547,7 @@
         if (alt.indexOf(other) < 0) alt.unshift(other); // siempre queda la otra opción para corregir por contexto
         alt = alt.filter(function (a) { return a !== ch; });
       }
-      out.push({ ch: ch, conf: conf, bits: bits, alt: alt });
+      out.push({ ch: ch, conf: conf, bits: bits, alt: alt, feat: feat, learned: learned });
     }
 
     var chars = out.map(function (o) { return o.ch; });
@@ -2140,7 +2151,7 @@
       var lcd = prepareLcd(frame, q, opts.width || 480), W = lcd.size.w, H = lcd.size.h, res = {};
       (only || keys).forEach(function (k) {
         var f = fields[k];
-        res[k] = decodeField(lcd.img, { x: f.x * W, y: f.y * H, w: f.w * W, h: f.h * H }, { digits: f.digits, decimals: f.decimals, slantDeg: slant, lightSegments: opts.lightSegments, format: fmtOf(k) });
+        res[k] = decodeField(lcd.img, { x: f.x * W, y: f.y * H, w: f.w * W, h: f.h * H }, { digits: f.digits, decimals: f.decimals, slantDeg: slant, lightSegments: opts.lightSegments, format: fmtOf(k), learn: opts.learnFor ? opts.learnFor(k) : null });
       });
       return { lcd: lcd, res: res };
     };
@@ -2180,6 +2191,56 @@
       });
     });
     return out;
+  }
+
+  /**
+   * Clasificador por vecinos más cercanos sobre los rasgos de dígito guardados.
+   * samples: [{ ch, x: [8 números], w (peso) }]. Devuelve fn(x) → { ch, conf (0–1), n (vecinos de la clase ganadora) }.
+   */
+  function makeKnn(samples, k) {
+    k = k || 7;
+    if (!samples || samples.length < 10) return null;
+    return function (x) {
+      var best = [];
+      for (var i = 0; i < samples.length; i++) {
+        var s = samples[i], d = 0;
+        for (var j = 0; j < x.length && j < s.x.length; j++) { var e = x[j] - s.x[j]; d += e * e; }
+        if (best.length < k || d < best[best.length - 1].d) {
+          best.push({ d: d, s: s });
+          best.sort(function (a, b) { return a.d - b.d; });
+          if (best.length > k) best.pop();
+        }
+      }
+      var votes = {}, tot = 0, cnt = {};
+      best.forEach(function (b) { var w = (b.s.w || 1) / (Math.sqrt(b.d) + 0.05); votes[b.s.ch] = (votes[b.s.ch] || 0) + w; cnt[b.s.ch] = (cnt[b.s.ch] || 0) + 1; tot += w; });
+      var top = null;
+      Object.keys(votes).forEach(function (c) { if (!top || votes[c] > votes[top]) top = c; });
+      return top == null ? null : { ch: top, conf: votes[top] / tot, n: cnt[top] };
+    };
+  }
+  /** Regla fija (sin aprendizaje) sobre los mismos rasgos: patrón de 7 segmentos más cercano. */
+  function ruleChar(x) {
+    var bestC = null, bestD = Infinity;
+    Object.keys(CANONICAL).forEach(function (c) {
+      if (c === "L" || c === "H") return;
+      var p = CANONICAL[c], d = 0;
+      for (var i = 0; i < 7; i++) { var e = x[i] - (p[i] === "1" ? 1 : 0); d += e * e; }
+      if (d < bestD) { bestD = d; bestC = c; }
+    });
+    if ((bestC === "1" || bestC === "7") && x.length > 7) bestC = x[7] > 0.45 ? "7" : "1";
+    return bestC;
+  }
+  /** Precisión estimada dejando cada muestra fuera: { n, rule (%), learned (%) }. */
+  function learnAccuracy(samples, maxN) {
+    var list = samples.slice(-(maxN || 600)), okR = 0, okL = 0, n = 0;
+    list.forEach(function (s, i) {
+      var others = samples.filter(function (o) { return o !== s; });
+      var kn = makeKnn(others), r = ruleChar(s.x), l = kn ? kn(s.x) : null;
+      n++;
+      if (r === s.ch) okR++;
+      if ((l ? l.ch : r) === s.ch) okL++;
+    });
+    return { n: n, rule: n ? Math.round((1000 * okR) / n) / 10 : null, learned: n ? Math.round((1000 * okL) / n) / 10 : null };
   }
 
   var APP_W = 64, APP_H = 48;
@@ -2453,6 +2514,9 @@
     b64ToThumb: b64ToThumb,
     decodeField: decodeField,
     readLcd: readLcd,
+    makeKnn: makeKnn,
+    ruleChar: ruleChar,
+    learnAccuracy: learnAccuracy,
     rotateQuad: rotateQuad,
     renderField: renderField,
     renderDisplay: renderDisplay,
